@@ -19,7 +19,7 @@ cat > "$APP/Contents/Info.plist" <<P
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleExecutable</key><string>NxNativeBuilder</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>5</string><key>CFBundleShortVersionString</key><string>2.3</string>
+<key>CFBundleVersion</key><string>6</string><key>CFBundleShortVersionString</key><string>2.4</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

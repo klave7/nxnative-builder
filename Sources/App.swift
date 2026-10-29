@@ -228,6 +228,7 @@ struct QueueSection: View {
                     .font(.caption).foregroundColor(.orange)
             } else if !t.isEmpty { Text("Fits on the home screen.").font(.caption).foregroundColor(.secondary) }
             ForEach(m.jobs) { j in
+              VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text(j.name).bold().frame(width: 180, alignment: .leading)
                     Text(j.folder).font(.caption).foregroundColor(.secondary).lineLimit(1).truncationMode(.middle)
@@ -239,6 +240,8 @@ struct QueueSection: View {
                         Button { m.remove(j) } label: { Image(systemName: "xmark") }
                     }
                 }
+                if j.status == "failed", let r = j.reason { Text(r).font(.caption).foregroundColor(.red).textSelection(.enabled) }
+              }
             }
             HStack {
                 Button("Process queue…") { Task { await m.runQueue() } }.buttonStyle(.borderedProminent).disabled(!m.busy.isEmpty)

@@ -84,6 +84,7 @@ struct Job: Identifiable, Codable {
     var id: Int
     var folder, name: String
     var status = "waiting"
+    var reason: String? = nil   // one sentence on why the last build failed
 }
 
 struct Config: Codable {
@@ -194,8 +195,34 @@ final class AppModel: ObservableObject {
 
     // MARK: running commands
     /// Runs a command, copying its output to the log. It leads its own process group, so Stop reaches everything it started.
+    var streamText = ""   // the output of the last command, for failureReason
+
+    /// One sentence on why a build failed, from the script's output: the step that failed (its ✗ line) and the last Python exception, FAIL: line or [RED] line after it.
+    func failureReason(_ text: String) -> String {
+        let lines = text.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: #"^\[\d\d:\d\d:\d\d\] "#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces) }
+        let at = lines.lastIndex { $0.hasPrefix("✗") }
+        var step = ""
+        if let a = at { step = lines[a].replacingOccurrences(of: #"^✗ (\[\d+/\d+\] )?"#, with: "", options: .regularExpression).replacingOccurrences(of: #" \(\d+:\d+\)$"#, with: "", options: .regularExpression) }
+        let tail = Array(lines[(at ?? 0)...])
+        func clean(_ s: String) -> String {
+            var r = s.replacingOccurrences(of: "[RED] ", with: "").replacingOccurrences(of: "FAIL: ", with: "")
+            if let q = r.range(of: #": ['\"/]"#, options: .regularExpression), r.hasPrefix("FileExists") || r.hasPrefix("FileNotFound") || r.hasPrefix("PermissionError") { r = String(r[..<q.lowerBound]) }
+            if let dot = r.range(of: ". ") { r = String(r[..<dot.lowerBound]) }
+            if r.count > 170 { r = String(r.prefix(170)) + "…" }
+            return r.trimmingCharacters(in: CharacterSet(charactersIn: " .;:"))
+        }
+        let isErr = { (l: String) in l.range(of: #"^[A-Za-z_.]+(Error|Exception|Exit|Interrupt): "#, options: .regularExpression) != nil }
+        let why = tail.last(where: isErr) ?? tail.last { $0.hasPrefix("FAIL:") } ?? tail.last { $0.hasPrefix("[RED]") && !$0.contains("exit code") && !$0.contains("provisional game profile") }
+            ?? lines.last { $0.hasPrefix("[RED]") && !$0.contains("exit code") && !$0.contains("provisional game profile") }
+        let w = why.map(clean) ?? ""
+        if !step.isEmpty && !w.isEmpty { return "Failed at \(step): \(w)." }
+        if !w.isEmpty { return "Failed: \(w)." }
+        return step.isEmpty ? "Failed; the log has no reason." : "Failed at \(step); the log has no reason."
+    }
+
     func stream(_ args: [String], cwd: String? = nil) async -> Int32 {
         say("$ " + args.joined(separator: " ") + "\n")
+        streamText = ""
         return await withCheckedContinuation { cont in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
@@ -208,13 +235,13 @@ final class AppModel: ObservableObject {
                 let d = h.availableData
                 if d.isEmpty { return }
                 let s = String(decoding: d, as: UTF8.self)
-                DispatchQueue.main.async { self.say(s) }
+                DispatchQueue.main.async { self.say(s); self.streamText += s }
             }
             p.terminationHandler = { proc in
                 pipe.fileHandleForReading.readabilityHandler = nil
                 let rest = pipe.fileHandleForReading.readDataToEndOfFile()
                 DispatchQueue.main.async {
-                    if !rest.isEmpty { self.say(String(decoding: rest, as: UTF8.self)) }
+                    if !rest.isEmpty { let r = String(decoding: rest, as: UTF8.self); self.say(r); self.streamText += r }
                     self.current = nil
                     cont.resume(returning: proc.terminationStatus)
                 }
@@ -537,7 +564,7 @@ final class AppModel: ObservableObject {
         let n = jobs.filter { ["waiting", "failed", "stopped"].contains($0.status) }.count
         guard n > 0 else { message = "The queue has nothing to build."; return }
         guard await ask("Process the queue?", "Builds \(n) game(s) in order and writes each IPA to \(out). The output folder is created if it is missing."
-                        + (cleanup ? " After each successful build, its build folders in the NSP folder are deleted." : ""), ok: "Start") else { return }
+                        + (cleanup ? " After each build, whether it succeeds, fails or is stopped, its build folders in the NSP folder are deleted." : ""), ok: "Start") else { return }
         for i in jobs.indices where jobs[i].status == "failed" || jobs[i].status == "stopped" { jobs[i].status = "waiting" }
         await work("Building the queue") {
             try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
@@ -552,8 +579,10 @@ final class AppModel: ObservableObject {
                 let rc = await stream(cmd, cwd: repoDir)
                 let status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
                 if let k = jobs.firstIndex(where: { $0.id == job.id }) { jobs[k].status = status }
-                say("----- \(job.name): \(status) (exit \(rc))\n")
-                if cleanup && status == "done" { clean(folder: job.folder, ipa: ipa, since: started) }
+                let why = status == "failed" ? failureReason(streamText) : nil
+                if let k = jobs.firstIndex(where: { $0.id == job.id }) { jobs[k].reason = why }
+                say("----- \(job.name): \(status) (exit \(rc))" + (why.map { " — " + $0 } ?? "") + "\n")
+                if cleanup { clean(folder: job.folder, ipa: ipa, since: started, built: status == "done") }
                 save()
             }
             for k in jobs.indices where jobs[k].status == "running" { jobs[k].status = "stopped" }
@@ -562,9 +591,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Deletes the build folders this run used in the game's NSP folder: <title ID>_build, _survey and -work, nothing else, and only once the IPA exists.
-    func clean(folder: String, ipa: String, since: Date) {
+    func clean(folder: String, ipa: String, since: Date, built: Bool = true) {
         let fm = FileManager.default
-        guard let size = (try? fm.attributesOfItem(atPath: ipa))?[.size] as? Int, size > 0 else { say("Cleanup skipped: the IPA is not in the output folder.\n"); return }
+        if built, !(((try? fm.attributesOfItem(atPath: ipa))?[.size] as? Int ?? 0) > 0) { say("Cleanup skipped: the IPA is not in the output folder.\n"); return }   // a failed or stopped build has no IPA to protect: its folders are only scratch
         var freed = 0
         let idx = ipa + ".idx"   // the packer's reuse index beside the IPA: only useful for a quick repack, and it can be large
         if let a = try? fm.attributesOfItem(atPath: idx) {
