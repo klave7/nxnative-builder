@@ -208,7 +208,7 @@ struct QueueSection: View {
             }
             if !m.gamesFolder.isEmpty {
                 HStack {
-                    Text(m.scanning ? "Scanning the games folder…" : m.found.isEmpty ? "No subfolders with game files (NSP, NSZ, XCI, XCZ) found." : "\(m.found.count) game folder(s) found. Name each one and add it to the queue.").font(.caption).foregroundColor(.secondary)
+                    Text(m.scanning ? "Scanning the games folder…" : !m.scanned ? "Press Rescan to list the game folders." : m.found.isEmpty ? "No subfolders with game files (NSP, NSZ, XCI, XCZ) found." : "\(m.found.count) game folder(s) found. Name each one and add it to the queue.").font(.caption).foregroundColor(.secondary)
                     Spacer()
                     Button("Rescan") { m.scanGames() }
                 }
@@ -240,7 +240,7 @@ struct QueueSection: View {
                         Button { m.remove(j) } label: { Image(systemName: "xmark") }
                     }
                 }
-                if j.status == "failed", let r = j.reason { Text(r).font(.caption).foregroundColor(.red).textSelection(.enabled) }
+                if j.status == "failed" || j.status == "done", let r = j.reason { Text(r).font(.caption).foregroundColor(j.status == "failed" ? .red : .orange).textSelection(.enabled) }
               }
             }
             HStack {

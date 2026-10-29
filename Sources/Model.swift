@@ -161,7 +161,6 @@ final class AppModel: ObservableObject {
             nextId = (jobs.map { $0.id }.max() ?? -1) + 1
         }
         loaded = true
-        scanGames()
         Task { await refresh() }
         Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { _ in
             Task { @MainActor in if !self.setupDone && self.busy.isEmpty && self.question == nil { await self.refresh() } }
@@ -196,6 +195,7 @@ final class AppModel: ObservableObject {
     // MARK: running commands
     /// Runs a command, copying its output to the log. It leads its own process group, so Stop reaches everything it started.
     @Published var scanning = false
+    @Published var scanned = false   // the folder is listed only when asked: at launch a sleeping drive would freeze the app
     var streamText = ""   // the output of the last command, for failureReason
 
     /// One sentence on why a build failed, from the script's output: the step that failed (its ✗ line) and the last Python exception, FAIL: line or [RED] line after it.
@@ -219,6 +219,19 @@ final class AppModel: ObservableObject {
         if !step.isEmpty && !w.isEmpty { return "Failed at \(step): \(w)." }
         if !w.isEmpty { return "Failed: \(w)." }
         return step.isEmpty ? "Failed; the log has no reason." : "Failed at \(step); the log has no reason."
+    }
+
+    /// A note for a build that succeeded, from the script's output: the profile registers another game version than the files (the IPA is packed from a derived profile, without that version's fixes), or it was provisional.
+    func successNote(_ text: String) -> String? {
+        var notes: [String] = []
+        if let re = try? NSRegularExpression(pattern: #"is not a version game profile \S+ registers \(v(\d+) ([^)]*)\): packing v(\d+)"#),
+           let m = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) {
+            func g(_ i: Int) -> String { Range(m.range(at: i), in: text).map { String(text[$0]) } ?? "" }
+            notes.append((Int(g(1)) ?? 0) > (Int(g(3)) ?? 0) ? "profile requests a more recent update of the game (\(g(2))); get its update files for the tested build"
+                                                            : "the game files are newer than the version the profile was tested on (\(g(2)))")
+        }
+        if text.contains("[RED] provisional game profile") { notes.append("built with a provisional profile, so it may not boot") }
+        return notes.isEmpty ? nil : notes.joined(separator: "; ")
     }
 
     func stream(_ args: [String], cwd: String? = nil) async -> Int32 {
@@ -451,12 +464,12 @@ final class AppModel: ObservableObject {
     /// Lists the game folders in the background: a sleeping or slow external drive must not freeze the window.
     func scanGames() {
         let path = gamesFolder
-        found = []
+        found = []; scanned = false
         guard !path.isEmpty else { return }
         scanning = true
         Task {
             let r = await Task.detached { AppModel.scan(path) }.value
-            if path == gamesFolder { found = r }
+            if path == gamesFolder { found = r; scanned = true }
             scanning = false
         }
     }
@@ -593,7 +606,7 @@ final class AppModel: ObservableObject {
                 let rc = await stream(cmd, cwd: repoDir)
                 let status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
                 if let k = jobs.firstIndex(where: { $0.id == job.id }) { jobs[k].status = status }
-                let why = status == "failed" ? failureReason(streamText) : nil
+                let why = status == "failed" ? failureReason(streamText) : status == "done" ? successNote(streamText).map { "Success: " + $0 + "." } : nil
                 if let k = jobs.firstIndex(where: { $0.id == job.id }) { jobs[k].reason = why }
                 say("----- \(job.name): \(status) (exit \(rc))" + (why.map { " — " + $0 } ?? "") + "\n")
                 if cleanup { clean(folder: job.folder, ipa: ipa, since: started, built: status == "done") }
