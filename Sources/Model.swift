@@ -78,6 +78,7 @@ struct PatchItem: Identifiable {
     let name, title, path: String
     var state: PatchState
     var canUndo = false
+    var note = ""   // e.g. its docs were left out
 }
 
 struct Job: Identifiable, Codable {
@@ -388,9 +389,52 @@ final class AppModel: ObservableObject {
         guard await ask("Update nxnative?", "This takes your applied patches off, then replaces the local copy with Seedds' latest main (\(u.behind) newer commit(s)). Apply the patches again afterwards.",
                         command: "git reset --hard origin/main", ok: "Update") else { return }
         await work("Updating nxnative") {
-            for p in patches.reversed() where p.state == .applied { _ = await stream(["git", "apply", "-R", p.path], cwd: repoDir) }
+            for p in patches.reversed() where p.state == .applied { _ = await stream(["git", "apply", "-R"] + undoArgs(p.path) + [p.path], cwd: repoDir) }
             if await stream(["git", "reset", "--hard", "origin/main"], cwd: repoDir) == 0 { await fetchUpdates() }
         }
+    }
+
+
+    // MARK: newest Seedds version the patches fit
+    @Published var compat: (sha: String, subject: String, behind: Int, date: String)? = nil
+    @Published var compatNote = ""
+
+    /// Looks back through Seedds' main for the newest commit the whole patch stack goes onto (the doubling steps back, then a binary search between the last miss and the first fit).
+    func findCompatible() async {
+        compat = nil; compatNote = ""
+        await work("Looking for the newest version the patches fit") {
+            say("Fetching Seedds' latest …\n")
+            _ = await stream(["git", "fetch", "origin"], cwd: repoDir)
+            let revs = (await runAsync(["git", "rev-list", "--first-parent", "-n", "600", "origin/main"], cwd: repoDir)).1.split(separator: "\n").map(String.init)
+            let files = AppModel.patchFiles().map { $0.1 }
+            guard !revs.isEmpty, !files.isEmpty else { compatNote = "No Seedds history to search."; return }
+            func fits(_ i: Int) async -> Bool { await Task.detached { AppModel.stackFits(revs[i], files) }.value }
+            if await fits(0) { compatNote = "The patches fit Seedds' newest version; use Update to latest."; return }
+            var lo = 0, step = 1, hi = -1
+            while lo + step < revs.count {
+                let i = lo + step
+                if await fits(i) { hi = i; break }
+                lo = i; step *= 2
+            }
+            if hi < 0, await fits(revs.count - 1) { hi = revs.count - 1 }
+            guard hi >= 0 else { compatNote = "The patches do not fit any of Seedds' last \(revs.count) commits. They need updating."; return }
+            while hi - lo > 1 { let mid = (lo + hi) / 2; if await fits(mid) { hi = mid } else { lo = mid } }
+            let info = (await runAsync(["git", "log", "-1", "--format=%cs|%s", revs[hi]], cwd: repoDir)).1.split(separator: "|", maxSplits: 1).map(String.init)
+            compat = (revs[hi], info.count > 1 ? info[1] : "", hi, info.first ?? "")
+            say("Newest fit: \(String(revs[hi].prefix(7))), \(hi) commit(s) behind Seedds' newest.\n")
+        }
+    }
+
+    func useCompatible() async {
+        guard let c = compat else { return }
+        guard await ask("Use Seedds' version from \(c.date)?", "This takes your applied patches off, then sets the local copy to Seedds' commit \(c.sha.prefix(7)) (\(c.behind) commit(s) older than the newest), where all three patches fit. Apply the patches again afterwards. Update to latest returns to the newest.",
+                        command: "git reset --hard \(c.sha.prefix(7))", ok: "Use it") else { return }
+        await work("Going back to a version the patches fit") {
+            for p in patches.reversed() where p.state == .applied { _ = await stream(["git", "apply", "-R"] + undoArgs(p.path) + [p.path], cwd: repoDir) }
+            _ = await stream(["git", "reset", "--hard", c.sha], cwd: repoDir)
+        }
+        compat = nil; compatNote = ""
+        await refresh()
     }
 
     // MARK: patches (an ordered stack: each one goes on after the ones above it)
@@ -414,11 +458,37 @@ final class AppModel: ObservableObject {
         return subj.isEmpty ? (path as NSString).lastPathComponent : subj
     }
 
+    // How a patch may go on, in the order tried: as written, with one line of context (Seedds' surroundings moved), and without the documentation and test files (Seedds edited the same docs).
+    // The code hunks must always fit; only those optional files may be left out.
+    nonisolated static let optional = ["--exclude=docs/*", "--exclude=dm/tools/tests/*", "--exclude=dm/host/tests/*"]
+    nonisolated static let applyVariants: [(args: [String], say: String)] = [
+        ([], ""),
+        (["-C1"], "The patch's surrounding lines moved in this version of nxnative; applying it with one line of context.\n"),
+        (optional, "Its documentation and test changes no longer fit this version, so they are left out; the code changes are applied.\n"),
+        (["-C1"] + optional, "The surrounding lines moved and its documentation and test changes no longer fit: one line of context, the docs and tests left out.\n"),
+    ]
+    /// The first way that the patch can be applied (or, with reverse, taken off) to the working tree; nil if none.
+    nonisolated static func variant(_ path: String, reverse: Bool = false) -> Int? {
+        applyVariants.firstIndex { capture(["git", "apply", "--check"] + (reverse ? ["-R"] : []) + $0.args + [path], cwd: repoDir).0 == 0 }
+    }
+    /// Whether the whole patch stack goes onto a Seedds commit, tried in a scratch index (nothing in the working tree is touched).
+    nonisolated static func stackFits(_ commit: String, _ files: [String]) -> Bool {
+        let idx = NSTemporaryDirectory() + "nxb-index-\(getpid())"
+        defer { try? FileManager.default.removeItem(atPath: idx) }
+        func git(_ a: [String]) -> Int32 { capture(["env", "GIT_INDEX_FILE=" + idx, "git"] + a, cwd: repoDir).0 }
+        guard git(["read-tree", commit]) == 0 else { return false }
+        for f in files {
+            // git apply changes the index only when it succeeds, so the first variant that works also leaves the patch applied for the next one
+            guard applyVariants.contains(where: { git(["apply", "--cached"] + $0.args + [f]) == 0 }) else { return false }
+        }
+        return true
+    }
+
     nonisolated static func checkPatches() -> [PatchItem] {
         let have = FileManager.default.fileExists(atPath: repoDir + "/.git")
         let files = patchFiles()
         // The patches are a stack. The highest one that can be taken off is on, and so is every one below it (a lower patch cannot be taken off on its own while a higher one changes the same lines).
-        let top = have ? files.lastIndex { capture(["git", "apply", "--check", "-R", $0.1], cwd: repoDir).0 == 0 } ?? -1 : -1
+        let top = have ? files.lastIndex { variant($0.1, reverse: true) != nil } ?? -1 : -1
         var out: [PatchItem] = []
         var allBeforeApplied = true
         for (i, (name, path)) in files.enumerated() {
@@ -426,10 +496,12 @@ final class AppModel: ObservableObject {
             if !have { st = .norepo }
             else if i <= top { st = .applied }
             else if !allBeforeApplied { st = .locked }
-            else if capture(["git", "apply", "--check", path], cwd: repoDir).0 == 0 || capture(["git", "apply", "--check", "-C1", path], cwd: repoDir).0 == 0 || capture(["git", "apply", "--check", "--3way", path], cwd: repoDir).0 == 0 { st = .ready }
+            else if variant(path) != nil || capture(["git", "apply", "--check", "--3way", path], cwd: repoDir).0 == 0 { st = .ready }
             else { st = .conflict }
             allBeforeApplied = allBeforeApplied && st == .applied
-            out.append(PatchItem(name: name, title: patchTitle(path), path: path, state: st))
+            var item = PatchItem(name: name, title: patchTitle(path), path: path, state: st)
+            if st == .applied, let v = variant(path, reverse: true), applyVariants[v].args.contains(where: { $0.hasPrefix("--exclude") }) { item.note = "its documentation and test changes were left out (they no longer fit)" }
+            out.append(item)
         }
         for i in out.indices where out[i].state == .applied { out[i].canUndo = !out[(i + 1)...].contains { $0.state == .applied } }
         return out
@@ -438,11 +510,10 @@ final class AppModel: ObservableObject {
     func applyPatch(_ p: PatchItem) async {
         guard await ask("Apply this patch?", "Changes files in the local nxnative copy to add: \(p.title)", command: "git apply \(p.name)", ok: "Apply") else { return }
         await work("Applying \(p.name)") {
-            if await runAsync(["git", "apply", "--check", p.path], cwd: repoDir).0 == 0 {
-                _ = await stream(["git", "apply", p.path], cwd: repoDir)
-            } else if await runAsync(["git", "apply", "--check", "-C1", p.path], cwd: repoDir).0 == 0 {
-                say("The patch's surrounding lines moved in this version of nxnative; applying it with one line of context.\n")   // a fresh clone has no blobs for --3way, so this is the fallback that works anywhere
-                _ = await stream(["git", "apply", "-C1", p.path], cwd: repoDir)
+            if let v = await Task.detached(operation: { AppModel.variant(p.path) }).value {
+                let ver = AppModel.applyVariants[v]
+                if !ver.say.isEmpty { say(ver.say) }
+                _ = await stream(["git", "apply"] + ver.args + [p.path], cwd: repoDir)
             } else if await stream(["git", "apply", "--3way", p.path], cwd: repoDir) == 0 {
                 _ = await runAsync(["git", "reset", "-q"], cwd: repoDir)   // keep the changes in the working tree, not staged
             } else {
@@ -450,9 +521,11 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    /// The way the patch went on, so that it comes off the same way
+    func undoArgs(_ path: String) -> [String] { AppModel.variant(path, reverse: true).map { AppModel.applyVariants[$0].args } ?? [] }
     func undoPatch(_ p: PatchItem) async {
         guard await ask("Undo this patch?", "Removes from the local nxnative copy: \(p.title)", command: "git apply -R \(p.name)", ok: "Undo") else { return }
-        await work("Undoing \(p.name)") { _ = await stream(["git", "apply", "-R", p.path], cwd: repoDir) }
+        await work("Undoing \(p.name)") { _ = await stream(["git", "apply", "-R"] + undoArgs(p.path) + [p.path], cwd: repoDir) }
     }
 
     // MARK: queue

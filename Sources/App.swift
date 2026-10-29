@@ -195,7 +195,7 @@ struct PatchesSection: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(p.title).bold()
                         switch p.state {
-                        case .applied: Text("Applied").font(.caption).foregroundColor(.green)
+                        case .applied: Text(p.note.isEmpty ? "Applied" : "Applied; " + p.note).font(.caption).foregroundColor(p.note.isEmpty ? .green : .orange)
                         case .conflict: Text("Does not fit this version of nxnative (Seedds changed the same code).").font(.caption).foregroundColor(.red)
                         case .locked: Text("Apply the patch above first.").font(.caption).foregroundColor(.secondary)
                         default: EmptyView()
@@ -206,6 +206,20 @@ struct PatchesSection: View {
                     else { Button("Apply…") { Task { await m.applyPatch(p) } }.buttonStyle(.borderedProminent).disabled(p.state != .ready || !m.busy.isEmpty) }
                 }
                 Divider()
+            }
+            if m.patches.contains(where: { $0.state == .conflict }) || m.compat != nil || !m.compatNote.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("A patch does not fit Seedds' newest code.").bold().foregroundColor(.orange)
+                    Text("The app can look back through Seedds' recent versions for the newest one where all three patches fit, and use that until the patches are updated.").font(.caption).foregroundColor(.secondary)
+                    HStack {
+                        Button("Find the newest version the patches fit…") { Task { await m.findCompatible() } }.disabled(!m.busy.isEmpty)
+                        if let c = m.compat {
+                            Button("Use \(c.date) (\(c.behind) commits behind)…") { Task { await m.useCompatible() } }.buttonStyle(.borderedProminent).disabled(!m.busy.isEmpty)
+                        }
+                    }
+                    if let c = m.compat { Text("Newest fit: " + c.subject).font(.caption).foregroundColor(.secondary).lineLimit(2) }
+                    if !m.compatNote.isEmpty { Text(m.compatNote).font(.caption).foregroundColor(.secondary) }
+                }
             }
         }
     }
