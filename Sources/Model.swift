@@ -390,7 +390,7 @@ final class AppModel: ObservableObject {
                         command: "git reset --hard origin/main", ok: "Update") else { return }
         await work("Updating nxnative") {
             for p in patches.reversed() where p.state == .applied { _ = await stream(["git", "apply", "-R"] + undoArgs(p.path) + [p.path], cwd: repoDir) }
-            if await stream(["git", "reset", "--hard", "origin/main"], cwd: repoDir) == 0 { await fetchUpdates() }
+            if await stream(["git", "reset", "--hard", "origin/main"], cwd: repoDir) == 0 { for p in patches { for f in AppModel.removeStale(p.path) { say("Removed the leftover \(f).\n") } }; await fetchUpdates() }
         }
     }
 
@@ -432,6 +432,7 @@ final class AppModel: ObservableObject {
         await work("Going back to a version the patches fit") {
             for p in patches.reversed() where p.state == .applied { _ = await stream(["git", "apply", "-R"] + undoArgs(p.path) + [p.path], cwd: repoDir) }
             _ = await stream(["git", "reset", "--hard", c.sha], cwd: repoDir)
+            for p in patches { for f in AppModel.removeStale(p.path) { say("Removed the leftover \(f).\n") } }
         }
         compat = nil; compatNote = ""
         await refresh()
@@ -467,9 +468,31 @@ final class AppModel: ObservableObject {
         (optional, "Its documentation and test changes no longer fit this version, so they are left out; the code changes are applied.\n"),
         (["-C1"] + optional, "The surrounding lines moved and its documentation and test changes no longer fit: one line of context, the docs and tests left out.\n"),
     ]
+    /// The files a patch creates (its "new file mode" entries).
+    nonisolated static func newFiles(_ patchPath: String) -> [String] {
+        guard let text = try? String(contentsOfFile: patchPath, encoding: .isoLatin1) else { return [] }
+        var out: [String] = [], last = ""
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("diff --git "), let r = line.range(of: " b/", options: .backwards) { last = String(line[r.upperBound...]) }
+            else if line.hasPrefix("new file mode"), !last.isEmpty { out.append(last) }
+        }
+        return out
+    }
+    /// Files the patch would create that already sit untracked in the copy: what an earlier version of the patch left behind when it could not be taken off (a reset does not delete untracked files).
+    nonisolated static func staleNewFiles(_ patchPath: String) -> [String] {
+        newFiles(patchPath).filter { FileManager.default.fileExists(atPath: repoDir + "/" + $0) && capture(["git", "ls-files", "--error-unmatch", $0], cwd: repoDir).0 != 0 }
+    }
+    nonisolated static func removeStale(_ patchPath: String) -> [String] {
+        let gone = staleNewFiles(patchPath)
+        for f in gone { try? FileManager.default.removeItem(atPath: repoDir + "/" + f) }
+        return gone
+    }
+
     /// The first way that the patch can be applied (or, with reverse, taken off) to the working tree; nil if none.
     nonisolated static func variant(_ path: String, reverse: Bool = false) -> Int? {
-        applyVariants.firstIndex { capture(["git", "apply", "--check"] + (reverse ? ["-R"] : []) + $0.args + [path], cwd: repoDir).0 == 0 }
+        // a leftover untracked file the patch would create is left out of the check: applying removes it first
+        let stale = reverse ? [] : staleNewFiles(path).map { "--exclude=" + $0 }
+        return applyVariants.firstIndex { capture(["git", "apply", "--check"] + (reverse ? ["-R"] : []) + $0.args + stale + [path], cwd: repoDir).0 == 0 }
     }
     /// Whether the whole patch stack goes onto a Seedds commit, tried in a scratch index (nothing in the working tree is touched).
     nonisolated static func stackFits(_ commit: String, _ files: [String]) -> Bool {
@@ -500,7 +523,7 @@ final class AppModel: ObservableObject {
             else { st = .conflict }
             allBeforeApplied = allBeforeApplied && st == .applied
             var item = PatchItem(name: name, title: patchTitle(path), path: path, state: st)
-            if st == .applied, let v = variant(path, reverse: true), applyVariants[v].args.contains(where: { $0.hasPrefix("--exclude") }) { item.note = "its documentation and test changes were left out (they no longer fit)" }
+            if st == .applied, i == top, let v = variant(path, reverse: true), applyVariants[v].args.contains(where: { $0.hasPrefix("--exclude") }) { item.note = "its documentation and test changes were left out (they no longer fit)" }
             out.append(item)
         }
         for i in out.indices where out[i].state == .applied { out[i].canUndo = !out[(i + 1)...].contains { $0.state == .applied } }
@@ -512,6 +535,7 @@ final class AppModel: ObservableObject {
         await work("Applying \(p.name)") {
             if let v = await Task.detached(operation: { AppModel.variant(p.path) }).value {
                 let ver = AppModel.applyVariants[v]
+                for f in AppModel.removeStale(p.path) { say("Removed the leftover \(f) from an earlier version of this patch.\n") }
                 if !ver.say.isEmpty { say(ver.say) }
                 _ = await stream(["git", "apply"] + ver.args + [p.path], cwd: repoDir)
             } else if await stream(["git", "apply", "--3way", p.path], cwd: repoDir) == 0 {

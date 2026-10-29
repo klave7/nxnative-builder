@@ -19,12 +19,19 @@ struct NxNativeBuilderApp: App {
     }
 }
 
+/// "v2.6.2 (16)": the version and build number from the app's Info.plist
+let appVersion: String = {
+    let i = Bundle.main.infoDictionary
+    return "v" + (i?["CFBundleShortVersionString"] as? String ?? "?") + " (" + (i?["CFBundleVersion"] as? String ?? "?") + ")"
+}()
+
 struct ContentView: View {
     @EnvironmentObject var m: AppModel
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("NxNative Builder").font(.title2.bold())
+                Text(appVersion).font(.caption).foregroundColor(.secondary)
                 Spacer()
                 if !m.busy.isEmpty { ProgressView().controlSize(.small); Text(m.busy + "…").foregroundColor(.accentColor) }
                 if m.setupDone { Button(m.showSetup ? "Hide setup" : "Setup") { m.showSetup.toggle() } }
