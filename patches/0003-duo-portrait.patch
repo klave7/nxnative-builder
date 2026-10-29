@@ -1,28 +1,26 @@
-From ef0515eaeae170f889bdddb44b247950508be3c2 Mon Sep 17 00:00:00 2001
-From: nathan <nathan@nathans-MacBook-Pro.local>
-Date: Thu, 29 Oct 2026 09:15:49 -0600
+From 62e79f6c3a54b663373c63f828101ea0a4120228 Mon Sep 17 00:00:00 2001
+From: klave7 <5594473+klave7@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 15:18:56 -0600
 Subject: [PATCH 3/3] Portrait mode for the iPhone Duo (needs the blurred bars
  and the control editor) rotation setting, matched control margins
 
 ---
  dm/games/settings.py                     |   1 +
  dm/games/settings.tsv                    |   2 +
- dm/gfx/nvn/nvn_mtl.m                     |  82 ++++++++++++++--------
- dm/host/motion_fusion.h                  |  22 ++++++
- dm/host/tests/t_motion.c                 |  23 +++++++
- dm/ios/Sources/DmGamepad.m               |  84 ++++++++++++++++++-----
+ dm/gfx/nvn/nvn_mtl.m                     |  82 +++++++++++++++--------
+ dm/ios/Sources/DmGamepad.m               |  75 ++++++++++++++++-----
  dm/ios/Sources/Launcher.swift            |   7 +-
  dm/ios/Sources/LauncherSettings.swift    |  24 ++++++-
  dm/ios/Sources/controls_background.jpg   | Bin 0 -> 227296 bytes
  dm/ios/Sources/front_ios.m               |  32 ++++++++-
  dm/ios/project.yml                       |   3 +-
  dm/tools/tests/test_launcher_settings.py |   8 ++-
- docs/env_switches.tsv                    |   3 +
+ docs/env_switches.tsv                    |   2 +
  docs/frontends.md                        |   1 +
  docs/launcher.schema.json                |   1 +
  docs/playing.md                          |   2 +-
  docs/settings.md                         |  18 ++++-
- 17 files changed, 257 insertions(+), 56 deletions(-)
+ 15 files changed, 202 insertions(+), 56 deletions(-)
  create mode 100644 dm/ios/Sources/controls_background.jpg
 
 diff --git a/dm/games/settings.py b/dm/games/settings.py
@@ -204,72 +202,8 @@ index e5fdc97..d5dafb3 100644
      if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
      id<MTLTexture> raw = present_raw_src(src);
      fx_state fx = {0};
-diff --git a/dm/host/motion_fusion.h b/dm/host/motion_fusion.h
-index 3ea19b6..77bc8de 100644
---- a/dm/host/motion_fusion.h
-+++ b/dm/host/motion_fusion.h
-@@ -130,3 +130,25 @@ static inline void motion_phone_to_switch(int orient, const float in[3], float o
-     default: out[0] = in[0]; out[1] = in[1]; out[2] = in[2]; break;
-     }
- }
-+// Which way the phone is really held, from gravity (CoreMotion's gravity vector: toward the ground, in g, in the phone's axes). The screen's orientation says how the picture is turned
-+// against the phone's body, which a phone whose screen changes under the player (a foldable opened or closed) can leave as it was while the body is held 90 degrees differently,
-+// so its gyro would turn the wrong way. Held upright, gravity runs down the picture (Switch -y) in the right orientation, whichever the screen says. The orientation that puts gravity
-+// most nearly down the picture is a candidate; once the same one has been the candidate (clearly: more than 0.6 g down the picture, so not lying flat) for `samples` in a row, it
-+// replaces the screen's orientation; when it is the screen's own again the replacement ends. On a phone whose screen follows its body the candidate is always the screen's, so nothing changes
-+typedef struct { int over, cand, run; } motion_orient;   // over: the orientation that replaces the screen's (0 none), cand: the current candidate, run: samples it has held
-+static inline int motion_orient_from_gravity(const float g[3], float *down) {
-+    int best = 1; float bd = 2;
-+    for (int o = 1; o <= 4; o++) { float s[3]; motion_phone_to_switch(o, g, s); if (s[1] < bd) { bd = s[1]; best = o; } }
-+    if (down) *down = bd;
-+    return best;
-+}
-+// One sample: returns the orientation to map the sensors with (1..4); iface is the screen's
-+static inline int motion_orient_update(motion_orient *t, int iface, const float g[3], int samples) {
-+    float down; int c = motion_orient_from_gravity(g, &down);
-+    if (down > -0.6f) t->run = 0;   // lying flat or in between: keep what was decided
-+    else {
-+        if (c != t->cand) { t->cand = c; t->run = 0; }
-+        if (++t->run >= samples) t->over = c == iface ? 0 : c;
-+    }
-+    return t->over ? t->over : iface;
-+}
-diff --git a/dm/host/tests/t_motion.c b/dm/host/tests/t_motion.c
-index d1db663..5b236de 100644
---- a/dm/host/tests/t_motion.c
-+++ b/dm/host/tests/t_motion.c
-@@ -97,6 +97,29 @@ int main(void) {
-     // turning the phone (landscape right) about its own long side, which is the picture's x axis: rotation about phone -y becomes rotation about Switch +x
-     float rl[3] = {0, -1, 0}; motion_phone_to_switch(3, rl, o); CHECK(near(o[0], 1, 1e-6f) && near(o[1], 0, 1e-6f), "rotation axes follow the picture");
- 
-+    // the orientation from gravity: on a phone whose screen follows its body it is always the screen's (nothing replaced); where the body is held 90 degrees from what the screen says, it takes over
-+    float gdown3[3] = {-1, 0, 0}, gdown4[3] = {1, 0, 0}, gport[3] = {0, -1, 0}, gtilt[3] = {-0.5f, 0, -0.85f}, gflat2[3] = {0, 0, -1};
-+    float dn;
-+    CHECK(motion_orient_from_gravity(gdown3, &dn) == 3 && near(dn, -1, 1e-6f), "gravity down the picture of landscape right");
-+    CHECK(motion_orient_from_gravity(gdown4, &dn) == 4 && near(dn, -1, 1e-6f), "gravity down the picture of landscape left");
-+    CHECK(motion_orient_from_gravity(gport, &dn) == 1, "portrait upright");
-+    motion_orient t = {0, 0, 0}; int ro = 0;
-+    for (int i = 0; i < 200; i++) ro = motion_orient_update(&t, 3, gdown3, 30);
-+    CHECK(ro == 3 && t.over == 0, "screen and body agree: the screen's orientation, nothing replaced");
-+    for (int i = 0; i < 29; i++) ro = motion_orient_update(&t, 3, gport, 30);
-+    CHECK(ro == 3 && t.over == 0, "a different candidate must hold for the whole run before it counts");
-+    ro = motion_orient_update(&t, 3, gport, 30);
-+    CHECK(ro == 1 && t.over == 1, "opened: the body is held in portrait axes while the screen says landscape right, gravity wins");
-+    for (int i = 0; i < 100; i++) ro = motion_orient_update(&t, 3, gflat2, 30);
-+    CHECK(ro == 1 && t.over == 1, "lying flat keeps the last decision");
-+    for (int i = 0; i < 100; i++) ro = motion_orient_update(&t, 3, gtilt, 30);
-+    CHECK(ro == 1 && t.over == 1, "a phone tilted back 58 degrees is not confident enough to change anything");
-+    for (int i = 0; i < 30; i++) ro = motion_orient_update(&t, 3, gdown3, 30);
-+    CHECK(ro == 3 && t.over == 0, "closed again: the replacement ends");
-+    motion_orient t2 = {0, 0, 0};
-+    for (int i = 0; i < 30; i++) ro = motion_orient_update(&t2, 3, gdown4, 30);
-+    CHECK(ro == 4, "held upside down against the screen's word: gravity wins");
-+
-     printf("t_motion: %d checks, %d failed\n", checks, fails);
-     return fails != 0;
- }
 diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
-index ee5195e..4aaf3fe 100644
+index ee5195e..d828cb3 100644
 --- a/dm/ios/Sources/DmGamepad.m
 +++ b/dm/ios/Sources/DmGamepad.m
 @@ -8,7 +8,7 @@
@@ -290,32 +224,23 @@ index ee5195e..4aaf3fe 100644
  static BOOL g_motion_body;                  // samples in the body's frame (iOS 27+)
  static void phone_motion_start(UIView *body) {
      const char *e = getenv("DM_MOTION");
-@@ -97,12 +99,24 @@ static void phone_motion_start(UIView *body) {
+@@ -97,12 +99,15 @@ static void phone_motion_start(UIView *body) {
      g_motion.deviceMotionUpdateInterval = 1.0 / 100;
      if (@available(iOS 27.0, *)) { g_motion.deviceMotionBody = body; g_motion_body = YES; LOG("front end: the phone's motion comes in the pad view's frame (deviceMotionBody)"); }
      NSOperationQueue *q = [NSOperationQueue new]; q.maxConcurrentOperationCount = 1;
-+    // The screen's orientation alone (default). DM_PHONE_ORIENT=gravity also follows how the phone is held when that differs from the screen's (an experiment: lying on a side puts gravity along the picture,
-+    // which looks like an offset body, so it can turn the gyro wrong there). DM_PHONE_ROTATE=<0..3> turns the sensors that many more quarter turns about the screen's normal, for a screen that sits turned against the body (a foldable's)
-+    const char *po = getenv("DM_PHONE_ORIENT"); BOOL track = po && !strcmp(po, "gravity");
-+    if (track) LOG("front end: the phone's gyro follows how the phone is held (gravity) when that differs from the screen's orientation (DM_PHONE_ORIENT=gravity)");
-+    __block motion_orient track_state = {0, 0, 0}; __block int last_o = 0;
++    // DM_PHONE_ROTATE=<0..3> turns the sensors that many more quarter turns about the screen's normal, for a screen that sits turned against the body (a foldable's)
      [g_motion startDeviceMotionUpdatesToQueue:q withHandler:^(CMDeviceMotion *d, NSError *err) {
          (void)err; if (!d) return;
          float a[3] = {(float)(d.gravity.x + d.userAcceleration.x), (float)(d.gravity.y + d.userAcceleration.y), (float)(d.gravity.z + d.userAcceleration.z)};
          float w[3] = {(float)d.rotationRate.x, (float)d.rotationRate.y, (float)d.rotationRate.z}, as[3], ws[3];
          int o = g_motion_body ? 1 : atomic_load(&g_iface_orient);   // the body's frame is already the picture's: the portrait map, which leaves it as it is
-+        if (track && !g_motion_body) {
-+            float g[3] = {(float)d.gravity.x, (float)d.gravity.y, (float)d.gravity.z};
-+            o = motion_orient_update(&track_state, o, g, 30);   // 0.3 s at 100 Hz
-+            if (o != last_o) { LOG("front end: gyro orientation %d (the screen says %d)", o, atomic_load(&g_iface_orient)); last_o = o; }
-+        }
          motion_phone_to_switch(o, a, as); motion_phone_to_switch(o, w, ws);
 +        int quarter = atomic_load(&g_phone_rotate); if (quarter < 0) quarter = atomic_load(&g_auto_quarter);
 +        for (int k = 0; k < quarter; k++) { float t = as[0]; as[0] = -as[1]; as[1] = t; t = ws[0]; ws[0] = -ws[1]; ws[1] = t; }   // a quarter turn about z: (x, y) → (−y, x)
          dm_motion_set_switch(0, as, ws);
      }];
  }
-@@ -135,6 +149,9 @@ static void phone_motion_start(UIView *body) {
+@@ -135,6 +140,9 @@ static void phone_motion_start(UIView *body) {
  static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
  int dm_opmode(void);   // hle_oe.c: 0 = handheld
  double mtl_present_aspect(void);   // nvn_mtl.m: width / height of the picture the last present showed
@@ -325,7 +250,7 @@ index ee5195e..4aaf3fe 100644
  
  @interface DmGamepad : UIView
  @end
-@@ -160,7 +177,7 @@ @implementation DmGamepad {
+@@ -160,7 +168,7 @@ @implementation DmGamepad {
      float _dx[E_N], _dy[E_N], _sz[E_N];            // the player's offset (u) and size factor of each control
      BOOL _edit; int _sel;                          // the editor is open / the control being edited (-1 none)
      UITouch *_editTouch; CGPoint _editLast;        // the finger dragging the selected control
@@ -334,7 +259,7 @@ index ee5195e..4aaf3fe 100644
      signed char _vis[2][E_N];                      // per layout (2D, 3D): 0 = built-in choice, 1 = the player turned the control on, 2 = off
  }
  
-@@ -218,6 +235,9 @@ - (instancetype)initWithFrame:(CGRect)f {
+@@ -218,6 +226,9 @@ - (instancetype)initWithFrame:(CGRect)f {
          [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidDisconnectNotification object:nil];
          pads_start();
          [self padsChanged:nil];
@@ -344,7 +269,7 @@ index ee5195e..4aaf3fe 100644
          motion_start();
          phone_motion_start(self);
          const char *ed = getenv("DM_PAD_EDIT");
-@@ -244,9 +264,27 @@ - (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → 2D: release e
+@@ -244,9 +255,27 @@ - (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → 2D: release e
  }
  
  // ---- Layout (points; computed inside the safe area) ----
@@ -375,7 +300,7 @@ index ee5195e..4aaf3fe 100644
  static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPointMake(right ? CGRectGetMaxX(s) - dx : CGRectGetMinX(s) + dx, y); }
  static CGPoint add(CGPoint a, CGPoint b) { return CGPointMake(a.x + b.x, a.y + b.y); }
  static int elemOf(int b) {   // the control a locked key belongs to
-@@ -266,7 +304,7 @@ - (CGPoint)facePos:(int)b { CGPoint c = self.faceCenter; CGFloat g = self.faceGa
+@@ -266,7 +295,7 @@ - (CGPoint)facePos:(int)b { CGPoint c = self.faceCenter; CGFloat g = self.faceGa
  - (CGPoint)stickHome { CGRect s = self.corner; return add(side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u), [self off:E_STICK]); }   // the left stick's ring centre
  - (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
  - (CGFloat)stickR:(int)i { return i ? K_RSTICK_R * self.u : K_STICK_R * self.u * [self sc:E_STICK]; }
@@ -384,7 +309,7 @@ index ee5195e..4aaf3fe 100644
  - (CGPoint)dpadCenter { CGRect s = self.corner; CGFloat u = self.u; return add(side(s, 0, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u), [self off:E_DPAD]); }
  - (CGFloat)dpadR { return K_DPAD_R * self.u * [self sc:E_DPAD]; }
  static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
-@@ -349,11 +387,8 @@ - (void)recompute {
+@@ -349,11 +378,8 @@ - (void)recompute {
  // Touches no control takes (all of them while a physical controller is connected) go to the game's touch screen, normalized on the 16:9 picture that front_ios.m
  // centres in the screen: Super Mario Galaxy's pointer in handheld mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
  - (void)pushGame {
@@ -397,7 +322,7 @@ index ee5195e..4aaf3fe 100644
      dm_touch t[16]; int n = 0;
      for (int i = 0; i < 16; i++) if (_game[i]) {
          CGPoint p = [_game[i] locationInView:self];
-@@ -466,11 +501,11 @@ - (void)enterEdit {
+@@ -466,11 +492,11 @@ - (void)enterEdit {
              UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem]; [b setTitle:a[0] forState:UIControlStateNormal]; b.tintColor = UIColor.whiteColor;
              [b addTarget:self action:NSSelectorFromString(a[1]) forControlEvents:UIControlEventTouchUpInside]; [row addArrangedSubview:b];
          }
@@ -414,7 +339,7 @@ index ee5195e..4aaf3fe 100644
          [self addSubview:_panel];
      }
      _panel.hidden = NO; [self applyLayout]; [self syncPanel]; [self setNeedsLayout];
-@@ -482,7 +517,7 @@ - (void)leaveEdit {
+@@ -482,7 +508,7 @@ - (void)leaveEdit {
  }
  - (void)layoutEditor {
      if (!_panel) return;
@@ -423,7 +348,7 @@ index ee5195e..4aaf3fe 100644
      _panel.frame = CGRectMake(floor(CGRectGetMidX(s) - w / 2), floor(CGRectGetMidY(s) - h / 2), w, h);
  }
  - (void)syncPanel {
-@@ -593,6 +628,23 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
+@@ -593,6 +619,23 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
  - (void)layoutSubviews {
      [super layoutSubviews];
      UIWindowScene *ws = self.window.windowScene; if (ws) atomic_store(&g_iface_orient, (int)ws.effectiveGeometry.interfaceOrientation);
@@ -4986,14 +4911,13 @@ index 9c849a5..e6e2577 100644
                  settings.meta(bad, 1)
              self.assertIn(why, str(e.exception))
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 22cc404..4ee7c4a 100644
+index 22cc404..ca182b2 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -191,6 +191,9 @@ DM_PAD_EDIT	player	`1` opens the on-screen control editor once when the game sta
+@@ -191,6 +191,8 @@ DM_PAD_EDIT	player	`1` opens the on-screen control editor once when the game sta
  DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
  DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
  DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
-+DM_PHONE_ORIENT	switch	On iOS, `gravity` makes the phone's gyro also follow how the phone is held (`motion_orient_update`, `motion_fusion.h`) when that stays different from the screen's orientation for 0.3 s; off by default, because a phone lying on its side puts gravity along the picture and is then turned wrongly
 +DM_PHONE_ROTATE	player	On iOS, `auto` (default; on iOS 27 and later none, since Core Motion delivers the samples in the picture's frame; on iOS 26 one quarter turn more on a known foldable's inner screen (recognized by its shape), in every orientation) or `<0..3>` (launcher setting **Gyro rotation**) turns the phone's gyro that many more quarter turns about the screen's normal, for a screen that sits turned against the phone's body (a foldable's inner screen)
 +DM_PORTRAIT_LAYOUT	player	On iOS, `0` turns off the portrait layout (default on; launcher setting **iPhone Duo portrait: game above the controls**): only on the iPhone Duo's inner screen held upright (every other iPhone and iPad stays landscape and is not affected), the picture is shown at the top of the screen and the on-screen controls are laid out below it (`DmGamepad.m`, `mtl_set_present_top`), instead of the picture centred with the controls over the whole screen
  DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC
