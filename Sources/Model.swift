@@ -426,7 +426,7 @@ final class AppModel: ObservableObject {
             if !have { st = .norepo }
             else if i <= top { st = .applied }
             else if !allBeforeApplied { st = .locked }
-            else if capture(["git", "apply", "--check", path], cwd: repoDir).0 == 0 || capture(["git", "apply", "--check", "--3way", path], cwd: repoDir).0 == 0 { st = .ready }
+            else if capture(["git", "apply", "--check", path], cwd: repoDir).0 == 0 || capture(["git", "apply", "--check", "-C1", path], cwd: repoDir).0 == 0 || capture(["git", "apply", "--check", "--3way", path], cwd: repoDir).0 == 0 { st = .ready }
             else { st = .conflict }
             allBeforeApplied = allBeforeApplied && st == .applied
             out.append(PatchItem(name: name, title: patchTitle(path), path: path, state: st))
@@ -440,6 +440,9 @@ final class AppModel: ObservableObject {
         await work("Applying \(p.name)") {
             if await runAsync(["git", "apply", "--check", p.path], cwd: repoDir).0 == 0 {
                 _ = await stream(["git", "apply", p.path], cwd: repoDir)
+            } else if await runAsync(["git", "apply", "--check", "-C1", p.path], cwd: repoDir).0 == 0 {
+                say("The patch's surrounding lines moved in this version of nxnative; applying it with one line of context.\n")   // a fresh clone has no blobs for --3way, so this is the fallback that works anywhere
+                _ = await stream(["git", "apply", "-C1", p.path], cwd: repoDir)
             } else if await stream(["git", "apply", "--3way", p.path], cwd: repoDir) == 0 {
                 _ = await runAsync(["git", "reset", "-q"], cwd: repoDir)   // keep the changes in the working tree, not staged
             } else {

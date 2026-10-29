@@ -1,8 +1,8 @@
-From 1c20414bcd02ffda0485cd70a6b9d86481084038 Mon Sep 17 00:00:00 2001
+From ef0515eaeae170f889bdddb44b247950508be3c2 Mon Sep 17 00:00:00 2001
 From: nathan <nathan@nathans-MacBook-Pro.local>
 Date: Thu, 29 Oct 2026 09:15:49 -0600
-Subject: [PATCH] Portrait mode for the iPhone Duo (needs the blurred bars and the control editor)
- rotation setting, matched control margins
+Subject: [PATCH 3/3] Portrait mode for the iPhone Duo (needs the blurred bars
+ and the control editor) rotation setting, matched control margins
 
 ---
  dm/games/settings.py                     |   1 +
@@ -38,7 +38,7 @@ index d16b9cb..fa824a8 100644
  
  
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index ede9151..a6b9ece 100644
+index 96f1f17..920d833 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
 @@ -25,9 +25,11 @@ DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
@@ -54,7 +54,7 @@ index ede9151..a6b9ece 100644
  DM_PSO_MTL4	toggle	-	DM_GAME_PSO_MTL4|1	gfxapi:nvn	Performance	Metal 4 pipelines	Keeps a pipeline archive; uses more memory.
  DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first start waits a few minutes for it, once.
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 20f3dc0..e3c30de 100644
+index e5fdc97..d5dafb3 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -453,7 +453,7 @@ void mtl_init(void) {
@@ -66,7 +66,7 @@ index 20f3dc0..e3c30de 100644
          if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
          res_add(g_present_uv[i]);
      }
-@@ -10798,7 +10798,22 @@ static void present_pipeline(MTLPixelFormat format) {
+@@ -10935,7 +10935,22 @@ static void present_pipeline(MTLPixelFormat format) {
  // The rectangle of the canvas (dw x dh) the picture (cw x ch) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
  // differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
  // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
@@ -89,7 +89,7 @@ index 20f3dc0..e3c30de 100644
      double s = fmin(dw / cw, dh / ch);
      MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
      if (fabs((dw / dh) / (cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
-@@ -10927,26 +10942,33 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
+@@ -11064,26 +11079,33 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
      }
      return v;
  }
@@ -135,7 +135,7 @@ index 20f3dc0..e3c30de 100644
  }
  static void bar_pass_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> to, id<MTLRenderPipelineState> pso, id<MTLTexture> from, id<MTLBuffer> uvb) {
      MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
-@@ -10985,26 +11007,27 @@ static void bar_pass_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> to, id<MTLRende
+@@ -11122,26 +11144,27 @@ static void bar_pass_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> to, id<MTLRende
  static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], id<MTLBuffer> uvb, fx_state *fx) {
      NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
      present_pipeline(dst.pixelFormat);
@@ -173,7 +173,7 @@ index 20f3dc0..e3c30de 100644
      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
      rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
      id<MTL4RenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-@@ -11014,13 +11037,18 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11151,13 +11174,18 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      [g_present_args setTexture:tex.gpuResourceID atIndex:0];
      [g_present_args setSamplerState:g_blit_samp.gpuResourceID atIndex:0];
      [g_present_args setAddress:uvb.gpuAddress atIndex:0];
@@ -195,7 +195,7 @@ index 20f3dc0..e3c30de 100644
      [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
      [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
      m4_end(en);
-@@ -11030,7 +11058,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11167,7 +11195,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
  // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
  static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
      id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
@@ -448,12 +448,12 @@ index ee5195e..4aaf3fe 100644
      [CATransaction begin]; [CATransaction setDisableActions:YES];
      _controls.frame = self.layer.bounds;
 diff --git a/dm/ios/Sources/Launcher.swift b/dm/ios/Sources/Launcher.swift
-index dc63e4e..0272390 100644
+index f2cb6c1..4f5f45d 100644
 --- a/dm/ios/Sources/Launcher.swift
 +++ b/dm/ios/Sources/Launcher.swift
-@@ -8,6 +8,11 @@ import os
- 
- private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryKey: key) }
+@@ -91,6 +91,11 @@ private struct DocumentPicker: UIViewControllerRepresentable {
+     }
+ }
  
 +// The settings screen stays landscape: the app's Info.plist now lists portrait too (for the portrait layout on the iPhone Duo's inner screen, front_ios.m), which a hosting controller would take
 +private final class LauncherHost<Content: View>: UIHostingController<Content> {
@@ -463,7 +463,7 @@ index dc63e4e..0272390 100644
  private struct LauncherView: View {
      @ObservedObject var m: LauncherModel
      let play: () -> Void
-@@ -95,7 +100,7 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
+@@ -179,7 +184,7 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
          model.apply()
          h.dismiss(animated: false) { done() }
      }
@@ -4861,10 +4861,10 @@ literal 0
 HcmV?d00001
 
 diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
-index 54b4c9f..5aa2f4a 100644
+index 5e8fb21..5b3f037 100644
 --- a/dm/ios/Sources/front_ios.m
 +++ b/dm/ios/Sources/front_ios.m
-@@ -13,6 +13,9 @@
+@@ -15,6 +15,9 @@
  UIView *dm_gamepad_view(CGRect frame);
  void dm_gamepad_reset(void);
  void dm_gamepad_active(void);
@@ -4874,7 +4874,7 @@ index 54b4c9f..5aa2f4a 100644
  void mtl_set_bar_image(CGImageRef img);   // nvn_mtl.m: the still image for the bars (DM_BAR_FILL=image)
  void front_ios_boot(void);
  int front_ios_boot_ok(void);
-@@ -49,6 +52,7 @@ @interface DmRootVC : UIViewController
+@@ -51,6 +54,7 @@ @interface DmRootVC : UIViewController
  @property (nonatomic, strong) UIView *pad;
  @property (nonatomic, strong) UILabel *fps;
  @property (nonatomic) BOOL launched;
@@ -4882,7 +4882,7 @@ index 54b4c9f..5aa2f4a 100644
  @property (nonatomic) BOOL fill;   // DM_BAR_FILL=blur or image: the game view is the whole screen, and the present fits the picture in it and fills the bars (nvn_mtl.m)
  - (void)startGame;
  @end
-@@ -77,6 +81,9 @@ - (void)startGame {
+@@ -80,6 +84,9 @@ - (void)startGame {
        if (m && !strcmp(m, "image")) {
            NSString *path = [NSBundle.mainBundle pathForResource:@"bar_background" ofType:@"jpg"]; UIImage *img = path ? [UIImage imageWithContentsOfFile:path] : nil;
            if (img.CGImage) mtl_set_bar_image(img.CGImage); else LOG("[RED] front end: bar_background.jpg is not in the app, the bars stay black"); } }
@@ -4892,7 +4892,7 @@ index 54b4c9f..5aa2f4a 100644
      self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
      [self.view addSubview:self.game];
      g_layer = (CAMetalLayer *)self.game.layer;
-@@ -89,17 +96,27 @@ - (void)startGame {
+@@ -92,17 +99,27 @@ - (void)startGame {
      if (self.fps) [self.view addSubview:self.fps];
      [self.view setNeedsLayout]; [self.view layoutIfNeeded];
      UIApplication.sharedApplication.idleTimerDisabled = YES;
@@ -4922,7 +4922,7 @@ index 54b4c9f..5aa2f4a 100644
          self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
      }
  }
-@@ -117,7 +134,16 @@ - (void)viewDidAppear:(BOOL)a {
+@@ -120,7 +137,16 @@ - (void)viewDidAppear:(BOOL)a {
  - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
  - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
  - (BOOL)prefersStatusBarHidden { return YES; }
@@ -4941,7 +4941,7 @@ index 54b4c9f..5aa2f4a 100644
  UIViewController *front_ios_root(void) { return [DmRootVC new]; }
  
 diff --git a/dm/ios/project.yml b/dm/ios/project.yml
-index 4a1e3b6..174fa3b 100644
+index 1f97e69..81edfb5 100644
 --- a/dm/ios/project.yml
 +++ b/dm/ios/project.yml
 @@ -38,7 +38,8 @@ targets:
@@ -4986,7 +4986,7 @@ index 9c849a5..e6e2577 100644
                  settings.meta(bad, 1)
              self.assertIn(why, str(e.exception))
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 53a14b6..a81e316 100644
+index 22cc404..4ee7c4a 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
 @@ -191,6 +191,9 @@ DM_PAD_EDIT	player	`1` opens the on-screen control editor once when the game sta
@@ -5000,7 +5000,7 @@ index 53a14b6..a81e316 100644
  DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path
  DM_PRESENT_FIFO	switch	`0` makes the display link take the newest queued frame each tick, as before; by default it shows frames in order, at most one tick behind
 diff --git a/docs/frontends.md b/docs/frontends.md
-index a22b941..13f5f8c 100644
+index f2f9c8c..daa0755 100644
 --- a/docs/frontends.md
 +++ b/docs/frontends.md
 @@ -42,6 +42,7 @@ A built app carries the settings its game supports, as the iPhone app's settings
@@ -5037,7 +5037,7 @@ index bdf4378..112016d 100644
  Switch Pro Controller gyro on the Mac still needs the HID support being developed in [PR #296](https://github.com/seedds/nxnative/pull/296).
  
 diff --git a/docs/settings.md b/docs/settings.md
-index 5f91299..6c056cf 100644
+index 91dfe6f..c7e4ac7 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
 @@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
@@ -5091,7 +5091,7 @@ index 5f91299..6c056cf 100644
  
  Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing the window ends the app without the game. The app remembers your choices for that game, and a game started without the window, from a front end or with the window turned off, uses them too ([Saved choices](frontends.md#saved-choices)). A setting fixed by an `env.txt` or by the program that started the app is shown greyed out.
  
-@@ -227,6 +237,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
+@@ -242,6 +252,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
  | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
  | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
  | Edit controls at start | `DM_PAD_EDIT` | `1`, `0` |
@@ -5100,3 +5100,6 @@ index 5f91299..6c056cf 100644
  | Game rumble | `DM_RUMBLE` | `1`, `0` |
  | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
  | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
+-- 
+2.54.0 (Apple Git-157)
+
