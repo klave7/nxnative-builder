@@ -1,0 +1,599 @@
+// NxNative Builder's engine. Everything the window does is here: the setup checks and installs, updating the Seedds nxnative copy, the patches, and the build queue.
+// Everything the app ships (the patches, the icon) is inside the .app, so copying the .app to another Mac is all it takes. What it downloads goes to
+// ~/Library/Application Support/NxNative Builder: nxnative/ (a clone of github.com/seedds/nxnative) and venv/ (the build script's Python environment); config.json there holds
+// the user's settings and queue, and patches/ may hold extra .patch files of the user's own. Homebrew and its packages stay where Homebrew keeps them (/opt/homebrew), as Homebrew requires.
+// Every change is one of the fixed actions below, and each is put to the user first (ask).
+import SwiftUI
+import AppKit
+
+let repoURL = "https://github.com/seedds/nxnative"
+let pipPackages = ["lz4", "capstone", "fonttools", "backports.zstd", "nsz"]
+let formulae: [(id: String, label: String, tool: String, why: String)] = [
+    ("python@3.12", "Python 3.12", "python3.12", "runs the build script (its modules go into the app's own environment)"),
+    ("xcodegen", "XcodeGen", "xcodegen", "makes the Xcode project the IPA is built from"),
+    ("zstd", "zstd", "zstd", "decompresses the game's files"),
+    ("glslang", "glslang", "glslangValidator", "compiles an OpenGL game's shaders"),
+    ("dotnet", ".NET SDK", "dotnet", "runs the NSP extractor and the shader translator (needs .NET 10)"),
+]
+
+let dataDir = ProcessInfo.processInfo.environment["NXB_DATA"] ?? NSString(string: "~/Library/Application Support/NxNative Builder").expandingTildeInPath   // NXB_DATA: another folder, for tests
+let repoDir = dataDir + "/nxnative"
+let venvDir = dataDir + "/venv"
+let configPath = dataDir + "/config.json"
+
+func brewPath() -> String? { ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].first { FileManager.default.isExecutableFile(atPath: $0) } }
+
+func toolEnv() -> [String: String] {
+    var paths: [String] = []
+    if let b = brewPath() { paths.append((b as NSString).deletingLastPathComponent) }
+    paths += [venvDir + "/bin", "/usr/local/share/dotnet", NSString(string: "~/.dotnet").expandingTildeInPath, "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    var env = ProcessInfo.processInfo.environment
+    env["PATH"] = paths.joined(separator: ":")
+    env["PYTHONUNBUFFERED"] = "1"
+    env["HOMEBREW_NO_ENV_HINTS"] = "1"
+    env["PYTHONPATH"] = nil
+    return env
+}
+
+func which(_ tool: String) -> String? {
+    for d in (toolEnv()["PATH"] ?? "").split(separator: ":") {
+        let p = "\(d)/\(tool)"
+        if FileManager.default.isExecutableFile(atPath: p) { return p }
+    }
+    return nil
+}
+
+/// Runs a command to the end and returns its exit code and output (stdout and stderr together). Blocking: call it off the main thread.
+func capture(_ args: [String], cwd: String? = nil) -> (Int32, String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    p.arguments = args
+    p.environment = toolEnv()
+    if let cwd = cwd { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
+    let pipe = Pipe()
+    p.standardOutput = pipe; p.standardError = pipe; p.standardInput = FileHandle.nullDevice
+    do { try p.run() } catch { return (127, "\(error)") }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (p.terminationStatus, (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+func runAsync(_ args: [String], cwd: String? = nil) async -> (Int32, String) {
+    await Task.detached { capture(args, cwd: cwd) }.value
+}
+
+struct SetupItem: Identifiable {
+    let id: String
+    let label, why, how, command: String
+    var ok = false
+    var blocked = false
+    var manual = false
+    var deps: [String] = []
+}
+
+enum PatchState { case applied, ready, locked, conflict, norepo }
+
+struct PatchItem: Identifiable {
+    var id: String { name }
+    let name, title, path: String
+    var state: PatchState
+    var canUndo = false
+}
+
+struct Job: Identifiable, Codable {
+    var id: Int
+    var folder, name: String
+    var status = "waiting"
+}
+
+struct Config: Codable {
+    var keys = "", out = ""
+    var cleanup = false
+    var queue: [Job] = []
+    var games: String? = nil   // the games folder last scanned
+}
+
+struct Updates {
+    var head = "", checked = ""
+    var behind = 0
+    var subjects: [String] = []
+}
+
+/// A subfolder of the games folder that holds game files (NSP, NSZ, XCI, XCZ).
+struct FoundGame: Identifiable {
+    var id: String { path }
+    let path, folder: String
+    let files: Int
+}
+
+struct UninstallItem: Identifiable {
+    var id: String { path }
+    let path, label: String
+    let bytes: Int
+}
+
+struct Question: Identifiable {
+    let id = UUID()
+    let title, message, command, ok: String
+}
+
+@MainActor
+final class AppModel: ObservableObject {
+    @Published var setup: [SetupItem] = []
+    @Published var patches: [PatchItem] = []
+    @Published var updates: Updates?
+    @Published var jobs: [Job] = []
+    @Published var keys = "" { didSet { save() } }
+    @Published var out = "" { didSet { save() } }
+    @Published var cleanup = false { didSet { save() } }
+    @Published var log = ""
+    @Published var busy = ""
+    @Published var message = ""
+    @Published var question: Question?
+    @Published var showSetup = false
+    @Published var checked = false
+    @Published var repoReady = false
+    @Published var repoHead = ""
+    @Published var newFolder = ""
+    @Published var newName = ""
+    @Published var gamesFolder = "" { didSet { save() } }
+    @Published var found: [FoundGame] = []
+    @Published var foundNames: [String: String] = [:]
+    @Published var showUninstall = false
+    @Published var uninstallItems: [UninstallItem] = []
+    @Published var brewInstalled: [(id: String, label: String)] = []
+    @Published var brewPick: Set<String> = []
+    @Published var trashApp = true
+
+    private var answer: CheckedContinuation<Bool, Never>?
+    private var current: Process?
+    private var stopFlag = false
+    private var nextId = 0
+    private var loaded = false
+
+    var setupDone: Bool { checked && setup.allSatisfy { $0.ok } }
+
+    init() {
+        try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
+        if let d = FileManager.default.contents(atPath: configPath), let c = try? JSONDecoder().decode(Config.self, from: d) {
+            keys = c.keys; out = c.out; cleanup = c.cleanup; jobs = c.queue; gamesFolder = c.games ?? ""
+            nextId = (jobs.map { $0.id }.max() ?? -1) + 1
+        }
+        loaded = true
+        scanGames()
+        Task { await refresh() }
+        Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { _ in
+            Task { @MainActor in if !self.setupDone && self.busy.isEmpty && self.question == nil { await self.refresh() } }
+        }
+    }
+
+    func save() {
+        guard loaded else { return }
+        let c = Config(keys: keys, out: out, cleanup: cleanup, queue: jobs.filter { $0.status != "done" }.map { var j = $0; j.status = "waiting"; return j }, games: gamesFolder)
+        if let d = try? JSONEncoder().encode(c) { try? d.write(to: URL(fileURLWithPath: configPath)) }
+    }
+
+    func say(_ s: String) {
+        var parts = s.components(separatedBy: "\r")
+        log += parts.removeFirst()
+        for part in parts {   // a carriage return redraws the current line (git's progress): drop it and write the new one
+            if let nl = log.lastIndex(of: "\n") { log = String(log[...nl]) } else { log = "" }
+            log += part
+        }
+        if log.count > 2_000_000 { log = String(log.suffix(1_500_000)) }
+    }
+
+    // MARK: asking the user
+    func ask(_ title: String, _ message: String, command: String = "", ok: String = "Continue") async -> Bool {
+        await withCheckedContinuation { c in
+            answer = c
+            question = Question(title: title, message: message, command: command, ok: ok)
+        }
+    }
+    func reply(_ yes: Bool) { question = nil; answer?.resume(returning: yes); answer = nil }
+
+    // MARK: running commands
+    /// Runs a command, copying its output to the log. It leads its own process group, so Stop reaches everything it started.
+    func stream(_ args: [String], cwd: String? = nil) async -> Int32 {
+        say("$ " + args.joined(separator: " ") + "\n")
+        return await withCheckedContinuation { cont in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+            p.arguments = ["-e", "setpgrp(0,0); exec @ARGV or die \"$!\\n\"", "--"] + args
+            p.environment = toolEnv()
+            if let cwd = cwd { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
+            let pipe = Pipe()
+            p.standardOutput = pipe; p.standardError = pipe; p.standardInput = FileHandle.nullDevice
+            pipe.fileHandleForReading.readabilityHandler = { h in
+                let d = h.availableData
+                if d.isEmpty { return }
+                let s = String(decoding: d, as: UTF8.self)
+                DispatchQueue.main.async { self.say(s) }
+            }
+            p.terminationHandler = { proc in
+                pipe.fileHandleForReading.readabilityHandler = nil
+                let rest = pipe.fileHandleForReading.readDataToEndOfFile()
+                DispatchQueue.main.async {
+                    if !rest.isEmpty { self.say(String(decoding: rest, as: UTF8.self)) }
+                    self.current = nil
+                    cont.resume(returning: proc.terminationStatus)
+                }
+            }
+            do { try p.run(); current = p } catch { say("cannot start: \(error)\n"); cont.resume(returning: 127) }
+        }
+    }
+
+    func stop() {
+        stopFlag = true
+        if let p = current { kill(-p.processIdentifier, SIGINT) }
+    }
+
+    /// One job at a time: the window shows `label` while it runs.
+    func work(_ label: String, _ body: () async -> Void) async {
+        guard busy.isEmpty else { return }
+        busy = label; stopFlag = false; message = ""
+        await body()
+        busy = ""
+        await refresh()
+    }
+
+    // MARK: setup
+    func refresh() async {
+        let s = await Task.detached { AppModel.checkSetup() }.value
+        let p = await Task.detached { AppModel.checkPatches() }.value
+        let ready = FileManager.default.fileExists(atPath: repoDir + "/.git")
+        let head = ready ? await runAsync(["git", "log", "-1", "--format=%h, %cs"], cwd: repoDir).1 : ""
+        setup = s; patches = p; repoReady = ready; repoHead = head; checked = true
+    }
+
+    nonisolated static func checkSetup() -> [SetupItem] {
+        var items: [SetupItem] = []
+        let xc = capture(["xcodebuild", "-version"])
+        let xcodeOK = xc.0 == 0 && xc.1.contains("Xcode")
+        items.append(SetupItem(id: "xcode", label: "Xcode", why: "builds the iPhone app and compiles the shaders (a large download from the Mac App Store; the app cannot install it for you)",
+                               how: "Opens the Mac App Store page. Install Xcode, open it once and accept its licence, then press Recheck.", command: "open the Xcode page in the Mac App Store", ok: xcodeOK, manual: true))
+        let sdk = xcodeOK && capture(["xcodebuild", "-showsdks"]).1.contains("iphoneos")
+        items.append(SetupItem(id: "ios", label: "iOS platform for Xcode", why: "the iPhone SDK the app is built against (several GB)", how: "", command: "xcodebuild -downloadPlatform iOS", ok: sdk, deps: ["xcode"]))
+        let metal = xcodeOK && capture(["xcrun", "-sdk", "iphoneos", "metal", "--version"]).0 == 0
+        items.append(SetupItem(id: "metal", label: "Metal compiler", why: "compiles the game's shaders (Xcode installs it separately)", how: "", command: "xcodebuild -downloadComponent MetalToolchain", ok: metal, deps: ["xcode"]))
+        let brew = brewPath()
+        items.append(SetupItem(id: "brew", label: "Homebrew", why: "installs the command line tools below; its installer opens in Terminal and asks for your Mac password there", how: "",
+                               command: "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"   (runs in Terminal)", ok: brew != nil, manual: true))
+        for f in formulae {
+            items.append(SetupItem(id: "brew:" + f.id, label: f.label, why: f.why, how: "", command: "brew install " + f.id, ok: which(f.tool) != nil, deps: ["brew"]))
+        }
+        var venvOK = false
+        if FileManager.default.fileExists(atPath: venvDir + "/bin/python") { venvOK = capture([venvDir + "/bin/python", "-c", "import lz4.block,capstone,fontTools,backports.zstd"]).0 == 0 }
+        items.append(SetupItem(id: "venv", label: "Python environment", why: "the build script's Python modules (" + pipPackages.joined(separator: ", ") + "), kept in the app's own folder", how: "",
+                               command: "python3.12 -m venv '\(venvDir)' && pip install " + pipPackages.joined(separator: " "), ok: venvOK, deps: ["brew:python@3.12"]))
+        let ok = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.ok) })
+        return items.map { var i = $0; i.blocked = !i.ok && i.deps.contains { !(ok[$0] ?? false) }; return i }
+    }
+
+    func install(_ item: SetupItem) async {
+        let verb = item.manual ? (item.id == "xcode" ? "Open" : "Open Terminal") : "Install"
+        let msg = item.manual && !item.how.isEmpty ? item.how : "This will: \(item.why)."
+        guard await ask("\(item.id == "xcode" ? "Get" : "Install") \(item.label)?", msg, command: item.command, ok: verb) else { return }
+        switch item.id {
+        case "xcode":
+            NSWorkspace.shared.open(URL(string: "macappstore://apps.apple.com/app/xcode/id497799835")!)
+        case "brew":
+            let script = NSTemporaryDirectory() + "install-homebrew.command"   // a throwaway launcher, not an app file
+            let body = "#!/bin/bash\n/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\necho\necho \"Done. Close this window and press Recheck in NxNative Builder.\"\n"
+            try? body.write(toFile: script, atomically: true, encoding: .utf8)
+            chmod(script, 0o755)
+            NSWorkspace.shared.open(URL(fileURLWithPath: script), configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+            say("Homebrew's installer is open in Terminal: finish it there, then press Recheck.\n")
+        default:
+            await work("Installing \(item.label)") { await runInstall(item.id) }
+        }
+    }
+
+    private func runInstall(_ id: String) async {
+        switch id {
+        case "ios": _ = await stream(["xcodebuild", "-downloadPlatform", "iOS"])
+        case "metal": _ = await stream(["xcodebuild", "-downloadComponent", "MetalToolchain"])
+        case "venv":
+            let py = ((brewPath() ?? "") as NSString).deletingLastPathComponent + "/python3.12"
+            if await stream([py, "-m", "venv", venvDir]) == 0 {
+                _ = await stream([venvDir + "/bin/python", "-m", "pip", "install", "--upgrade", "pip"] + pipPackages)
+            }
+        default: if id.hasPrefix("brew:") { _ = await stream([brewPath() ?? "brew", "install", String(id.dropFirst(5))]) }
+        }
+    }
+
+    func installAll() async {
+        await refresh()
+        while let item = setup.first(where: { !$0.ok && !$0.blocked }) {
+            if item.manual { await install(item); return }
+            guard await ask("Install \(item.label)?", "This will: \(item.why).", command: item.command, ok: "Install") else { return }
+            await work("Installing \(item.label)") { await runInstall(item.id) }
+            if let again = setup.first(where: { $0.id == item.id }), !again.ok { return }   // it failed: stop and let the log be read
+        }
+    }
+
+    // MARK: Seedds nxnative: downloaded from the main page, updated only when the user wants
+    func download() async {
+        guard await ask("Download Seedds nxnative?", "Copies the project (about 450 MB, a couple of minutes) into the app's own folder. You can update it later or keep using that copy.",
+                        command: "git clone \(repoURL) '\(repoDir)'", ok: "Download") else { return }
+        await work("Downloading nxnative") {
+            if await stream(["git", "clone", "--progress", repoURL, repoDir]) != 0 { try? FileManager.default.removeItem(atPath: repoDir) }   // a cut-short clone is no copy
+        }
+    }
+
+    // MARK: updates
+    func checkUpdates() async {
+        await work("Checking for updates") { await fetchUpdates() }
+    }
+    private func fetchUpdates() async {
+        guard await stream(["git", "fetch", "origin"], cwd: repoDir) == 0 else { return }
+        let head = await runAsync(["git", "rev-parse", "--short", "HEAD"], cwd: repoDir).1
+        let behind = await runAsync(["git", "log", "--format=%h %s", "HEAD..origin/main"], cwd: repoDir).1.split(separator: "\n").map(String.init)
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+        updates = Updates(head: head, checked: f.string(from: Date()), behind: behind.count, subjects: Array(behind.prefix(12)))
+        say("Seedds nxnative: at \(head), \(behind.count) newer commit(s) on main.\n")
+    }
+    func applyUpdates() async {
+        guard let u = updates else { return }
+        guard await ask("Update nxnative?", "This takes your applied patches off, then replaces the local copy with Seedds' latest main (\(u.behind) newer commit(s)). Apply the patches again afterwards.",
+                        command: "git reset --hard origin/main", ok: "Update") else { return }
+        await work("Updating nxnative") {
+            for p in patches.reversed() where p.state == .applied { _ = await stream(["git", "apply", "-R", p.path], cwd: repoDir) }
+            if await stream(["git", "reset", "--hard", "origin/main"], cwd: repoDir) == 0 { await fetchUpdates() }
+        }
+    }
+
+    // MARK: patches (an ordered stack: each one goes on after the ones above it)
+    nonisolated static func patchFiles() -> [(String, String)] {
+        var found: [String: String] = [:]
+        for d in [(Bundle.main.resourcePath ?? "") + "/patches", dataDir + "/patches"] {
+            for n in ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []) where n.hasSuffix(".patch") { found[n] = d + "/" + n }
+        }
+        return found.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
+
+    nonisolated static func patchTitle(_ path: String) -> String {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return (path as NSString).lastPathComponent }
+        var subj = "", cur = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("Subject:") { subj = line.dropFirst(8).trimmingCharacters(in: .whitespaces); cur = true }
+            else if cur && line.hasPrefix(" ") { subj += " " + line.trimmingCharacters(in: .whitespaces) }
+            else if cur { break }
+        }
+        if let r = subj.range(of: #"^\[PATCH[^\]]*\]\s*"#, options: .regularExpression) { subj.removeSubrange(r) }
+        return subj.isEmpty ? (path as NSString).lastPathComponent : subj
+    }
+
+    nonisolated static func checkPatches() -> [PatchItem] {
+        let have = FileManager.default.fileExists(atPath: repoDir + "/.git")
+        let files = patchFiles()
+        // The patches are a stack. The highest one that can be taken off is on, and so is every one below it (a lower patch cannot be taken off on its own while a higher one changes the same lines).
+        let top = have ? files.lastIndex { capture(["git", "apply", "--check", "-R", $0.1], cwd: repoDir).0 == 0 } ?? -1 : -1
+        var out: [PatchItem] = []
+        var allBeforeApplied = true
+        for (i, (name, path)) in files.enumerated() {
+            var st: PatchState
+            if !have { st = .norepo }
+            else if i <= top { st = .applied }
+            else if !allBeforeApplied { st = .locked }
+            else if capture(["git", "apply", "--check", path], cwd: repoDir).0 == 0 || capture(["git", "apply", "--check", "--3way", path], cwd: repoDir).0 == 0 { st = .ready }
+            else { st = .conflict }
+            allBeforeApplied = allBeforeApplied && st == .applied
+            out.append(PatchItem(name: name, title: patchTitle(path), path: path, state: st))
+        }
+        for i in out.indices where out[i].state == .applied { out[i].canUndo = !out[(i + 1)...].contains { $0.state == .applied } }
+        return out
+    }
+
+    func applyPatch(_ p: PatchItem) async {
+        guard await ask("Apply this patch?", "Changes files in the local nxnative copy to add: \(p.title)", command: "git apply \(p.name)", ok: "Apply") else { return }
+        await work("Applying \(p.name)") {
+            if await runAsync(["git", "apply", "--check", p.path], cwd: repoDir).0 == 0 {
+                _ = await stream(["git", "apply", p.path], cwd: repoDir)
+            } else if await stream(["git", "apply", "--3way", p.path], cwd: repoDir) == 0 {
+                _ = await runAsync(["git", "reset", "-q"], cwd: repoDir)   // keep the changes in the working tree, not staged
+            } else {
+                say("The patch does not fit this version of nxnative (see above). Nothing was changed.\n")
+            }
+        }
+    }
+    func undoPatch(_ p: PatchItem) async {
+        guard await ask("Undo this patch?", "Removes from the local nxnative copy: \(p.title)", command: "git apply -R \(p.name)", ok: "Undo") else { return }
+        await work("Undoing \(p.name)") { _ = await stream(["git", "apply", "-R", p.path], cwd: repoDir) }
+    }
+
+    // MARK: queue
+    func pick(folder: Bool, title: String, start: String? = nil) -> String? {
+        let panel = NSOpenPanel()
+        panel.message = title
+        panel.canChooseDirectories = folder; panel.canChooseFiles = !folder; panel.canCreateDirectories = folder
+        panel.allowsMultipleSelection = false
+        if let s = start, !s.isEmpty { panel.directoryURL = URL(fileURLWithPath: s) }
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    func add() {
+        let name = newName.trimmingCharacters(in: .whitespaces)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: newFolder, isDirectory: &isDir), isDir.boolValue else { message = "Pick the folder that holds the NSP files."; return }
+        guard !name.isEmpty else { message = "Enter the game's name."; return }
+        jobs.append(Job(id: nextId, folder: newFolder, name: name)); nextId += 1
+        newFolder = ""; newName = ""; message = ""; save()
+    }
+    func scanGames() {
+        found = []
+        guard !gamesFolder.isEmpty, let subs = try? FileManager.default.contentsOfDirectory(atPath: gamesFolder) else { return }
+        let exts: Set<String> = ["nsp", "nsz", "xci", "xcz"]
+        for n in subs.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) where !n.hasPrefix(".") {
+            let p = gamesFolder + "/" + n
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue else { continue }
+            let count = ((try? FileManager.default.contentsOfDirectory(atPath: p)) ?? []).filter { exts.contains(($0 as NSString).pathExtension.lowercased()) }.count
+            if count > 0 { found.append(FoundGame(path: p, folder: n, files: count)) }
+        }
+    }
+    func isQueued(_ g: FoundGame) -> Bool { jobs.contains { $0.folder == g.path } }
+    func addFound(_ g: FoundGame) {
+        let name = (foundNames[g.path] ?? "").trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { message = "Enter a name for \(g.folder)."; return }
+        jobs.append(Job(id: nextId, folder: g.path, name: name)); nextId += 1
+        foundNames[g.path] = nil; message = ""; save()
+    }
+
+    // MARK: uninstall: what the app put on this Mac, listed with sizes and removed only after the user confirms
+    nonisolated static func leftovers() -> [UninstallItem] {
+        let home = NSString(string: "~").expandingTildeInPath
+        let bid = Bundle.main.bundleIdentifier ?? "local.nxnative.builder"
+        let cands: [(String, String)] = [
+            (dataDir + "/nxnative", "Downloaded Seedds nxnative (with the applied patches)"),
+            (dataDir + "/venv", "Python environment for the build script"),
+            (dataDir, "Settings, queue and the rest of the app's folder"),
+            (home + "/Library/Preferences/\(bid).plist", "App preferences"),
+            (home + "/Library/Caches/\(bid)", "App caches"),
+            (home + "/Library/Saved Application State/\(bid).savedState", "Saved window state"),
+            (home + "/Library/HTTPStorages/\(bid)", "App network storage"),
+            (home + "/Library/WebKit/\(bid)", "App web storage"),
+        ]
+        func size(_ p: String) -> Int {
+            var total = 0
+            if let e = FileManager.default.enumerator(at: URL(fileURLWithPath: p), includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) {
+                for case let u as URL in e { total += (try? u.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0 }
+            }
+            return total
+        }
+        var out: [UninstallItem] = []
+        var covered: [String] = []
+        for (p, label) in cands where FileManager.default.fileExists(atPath: p) {
+            if covered.contains(where: { p.hasPrefix($0 + "/") }) { continue }   // already inside an entry above
+            var bytes = size(p)
+            if p == dataDir { bytes = max(0, bytes - out.filter { covered.contains($0.path) }.reduce(0) { $0 + $1.bytes }) }   // what is left besides the entries above
+            out.append(UninstallItem(path: p, label: label, bytes: bytes))
+            if p != dataDir { covered.append(p) }
+        }
+        return out
+    }
+
+    func openUninstall() async {
+        guard busy.isEmpty else { message = "Wait for the current job to finish."; return }
+        brewPick = []; trashApp = true; showUninstall = true
+        uninstallItems = await Task.detached { AppModel.leftovers() }.value
+        var have: [(String, String)] = []
+        if let b = brewPath() {
+            let list = Set(await runAsync([b, "list", "--formula", "-1"]).1.split(separator: "\n").map(String.init))
+            have = formulae.filter { list.contains($0.id) }.map { ($0.id, $0.label) }
+        }
+        brewInstalled = have
+    }
+
+    func uninstall() async {
+        showUninstall = false
+        busy = "Uninstalling"; stopFlag = false
+        if !brewPick.isEmpty, let b = brewPath() {
+            for f in brewPick.sorted() { _ = await stream([b, "uninstall", f]) }
+        }
+        loaded = false   // nothing may be written back into the folder being removed
+        let bid = Bundle.main.bundleIdentifier ?? "local.nxnative.builder"
+        UserDefaults.standard.removePersistentDomain(forName: bid)
+        var removed: [String] = []
+        for it in uninstallItems {
+            // never anything but this app's own folders and files
+            let ok = it.path.hasPrefix(dataDir) || it.path.contains("/Library/") && it.path.contains(bid)
+            guard ok, it.path.split(separator: "/").count >= 3 else { continue }
+            do { try FileManager.default.removeItem(atPath: it.path); removed.append(it.path); say("Removed \(it.path)\n") }
+            catch { say("Could not remove \(it.path): \(error.localizedDescription)\n") }
+        }
+        if trashApp {
+            await withCheckedContinuation { c in
+                NSWorkspace.shared.recycle([Bundle.main.bundleURL]) { _, err in
+                    DispatchQueue.main.async { self.say(err == nil ? "Moved the app to the Trash.\n" : "Could not move the app to the Trash: \(err!.localizedDescription)\n"); c.resume() }
+                }
+            }
+        }
+        // The app writes its window frame and saved state while it quits: sweep those once more after it has gone.
+        let sweep = removed.filter { $0.contains("/Library/") }.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
+        if !sweep.isEmpty {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/sh"); p.arguments = ["-c", "sleep 3; rm -rf " + sweep]
+            try? p.run()
+        }
+        NSApp.terminate(nil)
+    }
+
+    func clearQueue() async {
+        guard !jobs.isEmpty, busy.isEmpty else { return }
+        guard await ask("Clear the whole queue?", "Removes all \(jobs.count) game(s) from the queue. Nothing on disk is deleted.", ok: "Clear queue") else { return }
+        jobs.removeAll(); save()
+    }
+    func remove(_ j: Job) { jobs.removeAll { $0.id == j.id }; save() }
+    func move(_ j: Job, _ d: Int) {
+        guard let i = jobs.firstIndex(where: { $0.id == j.id }), jobs.indices.contains(i + d) else { return }
+        jobs.swapAt(i, i + d); save()
+    }
+
+    func runQueue() async {
+        guard FileManager.default.fileExists(atPath: keys) else { message = "Set the path of prod.keys."; return }
+        guard !out.isEmpty else { message = "Choose the output folder for the IPA files."; return }
+        guard setupDone else { message = "Finish the setup first."; return }
+        guard repoReady else { message = "Download Seedds nxnative first."; return }
+        let n = jobs.filter { ["waiting", "failed", "stopped"].contains($0.status) }.count
+        guard n > 0 else { message = "The queue has nothing to build."; return }
+        guard await ask("Process the queue?", "Builds \(n) game(s) in order and writes each IPA to \(out). The output folder is created if it is missing."
+                        + (cleanup ? " After each successful build, its build folders in the NSP folder are deleted." : ""), ok: "Start") else { return }
+        for i in jobs.indices where jobs[i].status == "failed" || jobs[i].status == "stopped" { jobs[i].status = "waiting" }
+        await work("Building the queue") {
+            try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
+            while !stopFlag, let i = jobs.firstIndex(where: { $0.status == "waiting" }) {
+                jobs[i].status = "running"
+                let job = jobs[i]
+                let safe = job.name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-").trimmingCharacters(in: .whitespaces)
+                let ipa = out + "/" + safe + ".ipa"
+                say("\n===== \(job.name)  (\(job.folder)) -> \(ipa) =====\n")
+                let started = Date().addingTimeInterval(-2)
+                let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", job.folder, "-k", keys, "--app-name", job.name, "-o", ipa, "--progress", "lines"] + (cleanup ? ["--no-keep-extracted"] : [])
+                let rc = await stream(cmd, cwd: repoDir)
+                let status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
+                if let k = jobs.firstIndex(where: { $0.id == job.id }) { jobs[k].status = status }
+                say("----- \(job.name): \(status) (exit \(rc))\n")
+                if cleanup && status == "done" { clean(folder: job.folder, ipa: ipa, since: started) }
+                save()
+            }
+            for k in jobs.indices where jobs[k].status == "running" { jobs[k].status = "stopped" }
+            say(stopFlag ? "\nStopped.\n" : "\nQueue finished.\n")
+        }
+    }
+
+    /// Deletes the build folders this run used in the game's NSP folder: <title ID>_build, _survey and -work, nothing else, and only once the IPA exists.
+    func clean(folder: String, ipa: String, since: Date) {
+        let fm = FileManager.default
+        guard let size = (try? fm.attributesOfItem(atPath: ipa))?[.size] as? Int, size > 0 else { say("Cleanup skipped: the IPA is not in the output folder.\n"); return }
+        var freed = 0
+        let idx = ipa + ".idx"   // the packer's reuse index beside the IPA: only useful for a quick repack, and it can be large
+        if let a = try? fm.attributesOfItem(atPath: idx) {
+            freed += a[.size] as? Int ?? 0
+            try? fm.removeItem(atPath: idx)
+            say("Removed \(idx)\n")
+        }
+        for n in ((try? fm.contentsOfDirectory(atPath: folder)) ?? []).sorted() where n.range(of: #"^[0-9A-Fa-f]{16}(_build|_survey|-work)$"#, options: .regularExpression) != nil {
+            let p = folder + "/" + n
+            guard let a = try? fm.attributesOfItem(atPath: p), a[.type] as? FileAttributeType == .typeDirectory, (a[.modificationDate] as? Date ?? .distantPast) >= since else { continue }
+            var bytes = 0
+            if let e = fm.enumerator(at: URL(fileURLWithPath: p), includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey]) {
+                for case let u as URL in e { let v = try? u.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]); if v?.isSymbolicLink != true { bytes += v?.fileSize ?? 0 } }
+            }
+            try? fm.removeItem(atPath: p)
+            freed += bytes
+            say(String(format: "Removed %@ (%.1f GB)\n", p, Double(bytes) / 1e9))
+        }
+        say(String(format: "Cleanup done: %.1f GB freed.\n", Double(freed) / 1e9))
+    }
+
+    /// The name as the iPhone home screen shows it: nil when it fits, else the text with an ellipsis where it would be cut (an estimate: about 11–12 characters).
+    func truncatedLabel(_ t: String) -> String? {
+        let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        func width(_ s: String) -> CGFloat { (s as NSString).size(withAttributes: [.font: font]).width }
+        let maxW: CGFloat = 68
+        if width(t) <= maxW { return nil }
+        var s = t
+        while !s.isEmpty && width(s + "…") > maxW { s.removeLast() }
+        return s.trimmingCharacters(in: .whitespaces) + "…"
+    }
+}
