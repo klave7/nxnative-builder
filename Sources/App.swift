@@ -100,6 +100,17 @@ struct SetupSection: View {
                 Button("Recheck") { Task { await m.refresh() } }
             }
             Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Build games from a network drive in a local work folder", isOn: $m.localCache).bold()
+                Text("Copies the game files to the folder below, builds there, moves the IPA to the output folder, then deletes the copy, the build and survey folders and the .idx file at once (not to the Trash). Games already on a drive attached to this Mac are built where they are. Needs about twice the game's size free.").font(.caption).foregroundColor(.secondary)
+                if m.localCache {
+                    HStack {
+                        TextField(m.workRoot, text: $m.cacheDir).textFieldStyle(.roundedBorder)
+                        Button("Browse…") { if let p = m.pick(folder: true, title: "Local folder for the work copies", start: m.workRoot) { m.cacheDir = p } }
+                    }
+                }
+            }
+            Divider()
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Uninstall").bold()

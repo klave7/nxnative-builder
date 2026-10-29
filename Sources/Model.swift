@@ -92,6 +92,8 @@ struct Config: Codable {
     var cleanup = false
     var queue: [Job] = []
     var games: String? = nil   // the games folder last scanned
+    var localCache: Bool? = nil
+    var cacheDir: String? = nil
 }
 
 struct Updates {
@@ -138,6 +140,10 @@ final class AppModel: ObservableObject {
     @Published var newFolder = ""
     @Published var newName = ""
     @Published var gamesFolder = "" { didSet { save() } }
+    /// Copy a game that is on a network drive to a local folder, build there, move the IPA out and delete the copy.
+    @Published var localCache = false { didSet { save() } }
+    @Published var cacheDir = "" { didSet { save() } }
+    var workRoot: String { cacheDir.isEmpty ? NSTemporaryDirectory() + "NxNative Builder Work" : cacheDir }
     @Published var found: [FoundGame] = []
     @Published var foundNames: [String: String] = [:]
     @Published var showUninstall = false
@@ -157,7 +163,7 @@ final class AppModel: ObservableObject {
     init() {
         try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
         if let d = FileManager.default.contents(atPath: configPath), let c = try? JSONDecoder().decode(Config.self, from: d) {
-            keys = c.keys; out = c.out; cleanup = c.cleanup; jobs = c.queue; gamesFolder = c.games ?? ""
+            keys = c.keys; out = c.out; cleanup = c.cleanup; jobs = c.queue; gamesFolder = c.games ?? ""; localCache = c.localCache ?? false; cacheDir = c.cacheDir ?? ""
             nextId = (jobs.map { $0.id }.max() ?? -1) + 1
         }
         loaded = true
@@ -169,7 +175,7 @@ final class AppModel: ObservableObject {
 
     func save() {
         guard loaded else { return }
-        let c = Config(keys: keys, out: out, cleanup: cleanup, queue: jobs.filter { $0.status != "done" }.map { var j = $0; j.status = "waiting"; return j }, games: gamesFolder)
+        let c = Config(keys: keys, out: out, cleanup: cleanup, queue: jobs.filter { $0.status != "done" }.map { var j = $0; j.status = "waiting"; return j }, games: gamesFolder, localCache: localCache, cacheDir: cacheDir)
         if let d = try? JSONEncoder().encode(c) { try? d.write(to: URL(fileURLWithPath: configPath)) }
     }
 
@@ -591,7 +597,7 @@ final class AppModel: ObservableObject {
         let n = jobs.filter { ["waiting", "failed", "stopped"].contains($0.status) }.count
         guard n > 0 else { message = "The queue has nothing to build."; return }
         guard await ask("Process the queue?", "Builds \(n) game(s) in order and writes each IPA to \(out). The output folder is created if it is missing."
-                        + (cleanup ? " After each build, whether it succeeds, fails or is stopped, its build folders in the NSP folder are deleted." : ""), ok: "Start") else { return }
+                        + (localCache ? " Games on a network drive are copied to \(workRoot), built there, and the copy deleted afterwards." : "") + (cleanup ? " After each build, whether it succeeds, fails or is stopped, its build folders in the NSP folder are deleted." : ""), ok: "Start") else { return }
         for i in jobs.indices where jobs[i].status == "failed" || jobs[i].status == "stopped" { jobs[i].status = "waiting" }
         await work("Building the queue") {
             try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
@@ -602,19 +608,60 @@ final class AppModel: ObservableObject {
                 let ipa = out + "/" + safe + ".ipa"
                 say("\n===== \(job.name)  (\(job.folder)) -> \(ipa) =====\n")
                 let started = Date().addingTimeInterval(-2)
-                let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", job.folder, "-k", keys, "--app-name", job.name, "-o", ipa, "--progress", "lines"] + (cleanup ? ["--no-keep-extracted"] : [])
-                let rc = await stream(cmd, cwd: repoDir)
-                let status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
-                if let k = jobs.firstIndex(where: { $0.id == job.id }) { jobs[k].status = status }
-                let why = status == "failed" ? failureReason(streamText) : status == "done" ? successNote(streamText).map { "Success: " + $0 + "." } : nil
-                if let k = jobs.firstIndex(where: { $0.id == job.id }) { jobs[k].reason = why }
-                say("----- \(job.name): \(status) (exit \(rc))" + (why.map { " — " + $0 } ?? "") + "\n")
-                if cleanup { clean(folder: job.folder, ipa: ipa, since: started, built: status == "done") }
+                let (status, why) = await buildJob(job, safe: safe, ipa: ipa, started: started)
+                if let k = jobs.firstIndex(where: { $0.id == job.id }) { jobs[k].status = status; jobs[k].reason = why }
+                say("----- \(job.name): \(status)" + (why.map { " — " + $0 } ?? "") + "\n")
                 save()
             }
             for k in jobs.indices where jobs[k].status == "running" { jobs[k].status = "stopped" }
             say(stopFlag ? "\nStopped.\n" : "\nQueue finished.\n")
         }
+    }
+
+    /// Builds one queue item and returns its status and a one-sentence note. A game on a network volume is first copied to a local folder (when the option is on),
+    /// built there, and the IPA moved to the output folder; the local copy, the build and survey folders and the .idx are then deleted outright (rm, not the Trash).
+    func buildJob(_ job: Job, safe: String, ipa: String, started: Date) async -> (String, String?) {
+        let fm = FileManager.default
+        let cached = localCache && !AppModel.onLocalVolume(job.folder)
+        var folder = job.folder, target = ipa, work = ""
+        if cached {
+            work = workRoot + "/job-\(job.id)"
+            let exts: Set<String> = ["nsp", "nsz", "xci", "xcz"]
+            let names = ((try? fm.contentsOfDirectory(atPath: job.folder)) ?? []).filter { exts.contains(($0 as NSString).pathExtension.lowercased()) }
+            let total = names.reduce(0) { $0 + (((try? fm.attributesOfItem(atPath: job.folder + "/" + $1))?[.size] as? Int) ?? 0) }
+            try? fm.createDirectory(atPath: workRoot, withIntermediateDirectories: true)
+            let free = (try? URL(fileURLWithPath: workRoot).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage).flatMap { $0 } ?? Int64.max
+            if names.isEmpty { return ("failed", "Failed: no NSP, NSZ or XCI files in the folder.") }
+            if free < Int64(total) * 2 { return ("failed", String(format: "Failed: the local work folder needs about %.0f GB free (the game is %.0f GB) and has %.0f GB.", Double(total) * 2 / 1e9, Double(total) / 1e9, Double(free) / 1e9)) }
+            say(String(format: "Copying %d file(s), %.1f GB, from %@ to the local work folder %@ …\n", names.count, Double(total) / 1e9, job.folder, work))
+            _ = await stream(["/bin/rm", "-rf", work]); try? fm.createDirectory(atPath: work + "/out", withIntermediateDirectories: true)
+            let rc = await stream(["/usr/bin/rsync", "-a", "--progress"] + names.map { job.folder + "/" + $0 } + [work + "/"])
+            if rc != 0 || stopFlag {
+                _ = await stream(["/bin/rm", "-rf", work])
+                return stopFlag ? ("stopped", nil) : ("failed", "Failed: copying the game files to the local work folder did not finish (rsync exit \(rc)).")
+            }
+            folder = work; target = work + "/out/" + safe + ".ipa"
+        }
+        let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", folder, "-k", keys, "--app-name", job.name, "-o", target, "--progress", "lines"] + (cleanup || cached ? ["--no-keep-extracted"] : [])
+        let rc = await stream(cmd, cwd: repoDir)
+        var status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
+        var why = status == "failed" ? failureReason(streamText) : status == "done" ? successNote(streamText).map { "Success: " + $0 + "." } : nil
+        if cached {
+            var keep = false
+            if status == "done" {
+                say("Moving the IPA to \(ipa) …\n")
+                let mv = await stream(["/bin/mv", "-f", target, ipa])
+                if mv != 0 { status = "failed"; keep = true; why = "Failed: the IPA was built but could not be moved to the output folder; it is kept in \(work)/out." }
+            }
+            if !keep { say("Deleting the local work folder \(work) …\n"); _ = await stream(["/bin/rm", "-rf", work]) }
+        } else if cleanup {
+            clean(folder: job.folder, ipa: ipa, since: started, built: status == "done")
+        }
+        return (status, why)
+    }
+
+    nonisolated static func onLocalVolume(_ path: String) -> Bool {
+        (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) ?? true
     }
 
     /// Deletes the build folders this run used in the game's NSP folder: <title ID>_build, _survey and -work, nothing else, and only once the IPA exists.
