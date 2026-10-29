@@ -256,7 +256,7 @@ struct QueueSection: View {
                 Button("Add to queue") { m.add() }.buttonStyle(.borderedProminent)
             }
             if let c = cut {
-                Label("Too long for the iPhone home screen: it will show as “\(c)”. (An estimate: about 11–12 characters fit.) You can still add it.", systemImage: "exclamationmark.triangle.fill")
+                Label("Too long for the iPhone home screen: it will show as “\(c)”. (An estimate from the name\u{2019}s width.) You can still add it.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundColor(.orange)
             } else if !t.isEmpty { Text("Fits on the home screen.").font(.caption).foregroundColor(.secondary) }
             ForEach(m.jobs) { j in

@@ -701,6 +701,7 @@ final class AppModel: ObservableObject {
     /// built there, and the IPA moved to the output folder; the local copy, the build and survey folders and the .idx are then deleted outright (rm, not the Trash).
     func buildJob(_ job: Job, safe: String, ipa: String, started: Date) async -> (String, String?) {
         let fm = FileManager.default
+        guard !out.isEmpty else { return ("failed", "Failed: no output folder is set.") }
         let cached = localCache && !AppModel.onLocalVolume(job.folder)
         var folder = job.folder, target = ipa, work = ""
         if cached {
@@ -721,21 +722,37 @@ final class AppModel: ObservableObject {
             }
             folder = work; target = work + "/out/" + safe + ".ipa"
         }
+        // The packer writes <ipa>.idx (its reuse index, valid only beside the IPA it describes) next to the IPA it is given, so the IPA is packed in a build folder of its own and never straight into the
+        // output folder: no .idx lands there. With the cleanup box checked that folder is hidden on the output volume (the .ipa is renamed out of it and the rest deleted); without it the folder
+        // stays in the game's folder with its IPA and index (a repack of the game reuses them), and the output gets a copy.
+        var stage = ""
+        if !cached {
+            stage = cleanup ? out + "/.nxb-build-\(job.id)" : job.folder + "/.nxb-ipa"
+            if cleanup { _ = await stream(["/bin/rm", "-rf", stage]) }
+            try? fm.createDirectory(atPath: stage, withIntermediateDirectories: true)
+            target = stage + "/" + safe + ".ipa"
+        }
         let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", folder, "-k", keys, "--app-name", job.name, "-o", target, "--progress", "lines"] + (cleanup || cached ? ["--no-keep-extracted"] : [])
         let rc = await stream(cmd, cwd: repoDir)
         var status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
         var why = status == "failed" ? failureReason(streamText) : status == "done" ? successNote(streamText).map { "Success: " + $0 + "." } : nil
-        if cached {
-            var keep = false
-            if status == "done" {
-                say("Moving the IPA to \(ipa) …\n")
-                let mv = await stream(["/bin/mv", "-f", target, ipa])
-                if mv != 0 { status = "failed"; keep = true; why = "Failed: the IPA was built but could not be moved to the output folder; it is kept in \(work)/out." }
+        var keep = false
+        if status == "done" {
+            if cached { say("Moving the IPA to \(ipa) …\n") }
+            var mv: Int32
+            if cached || cleanup { mv = await stream(["/bin/mv", "-f", target, ipa]) }
+            else {   // the IPA stays beside its index in the build folder; the output gets a copy (a clone where the volume can), put in place only when whole
+                say("Copying the IPA to \(ipa) (the build folder keeps its own with the index) …\n")
+                let part = ipa + ".partial"
+                mv = await stream(["/bin/cp", "-c", target, part])
+                if mv != 0 { mv = await stream(["/bin/cp", target, part]) }
+                if mv == 0 { mv = await stream(["/bin/mv", "-f", part, ipa]) } else { _ = await stream(["/bin/rm", "-f", part]) }
             }
-            if !keep { say("Deleting the local work folder \(work) …\n"); _ = await stream(["/bin/rm", "-rf", work]) }
-        } else if cleanup {
-            clean(folder: job.folder, ipa: ipa, since: started, built: status == "done")
+            if mv != 0 { status = "failed"; keep = true; why = "Failed: the IPA was built but could not be put in the output folder; it is kept in \(target)." }
+            else { try? fm.removeItem(atPath: ipa + ".idx") }   // an index left in the output by an older version
         }
+        if cached { if !keep { say("Deleting the local work folder \(work) …\n"); _ = await stream(["/bin/rm", "-rf", work]) } }
+        else if cleanup { if !keep { _ = await stream(["/bin/rm", "-rf", stage]) }; clean(folder: job.folder, ipa: ipa, since: started, built: status == "done") }
         return (status, why)
     }
 
@@ -779,6 +796,9 @@ final class AppModel: ObservableObject {
         let fm = FileManager.default
         if built, !(((try? fm.attributesOfItem(atPath: ipa))?[.size] as? Int ?? 0) > 0) { say("Cleanup skipped: the IPA is not in the output folder.\n"); return }   // a failed or stopped build has no IPA to protect: its folders are only scratch
         var freed = 0
+        let kept = folder + "/.nxb-ipa"   // the IPA and its index kept by a build without the cleanup box
+        if let e = fm.enumerator(atPath: kept) { for case let f as String in e { freed += (try? fm.attributesOfItem(atPath: kept + "/" + f))?[.size] as? Int ?? 0 } }
+        if fm.fileExists(atPath: kept) { try? fm.removeItem(atPath: kept); say("Removed \(kept)\n") }
         let idx = ipa + ".idx"   // the packer's reuse index beside the IPA: only useful for a quick repack, and it can be large
         if let a = try? fm.attributesOfItem(atPath: idx) {
             freed += a[.size] as? Int ?? 0
@@ -799,11 +819,11 @@ final class AppModel: ObservableObject {
         say(String(format: "Cleanup done: %.1f GB freed.\n", Double(freed) / 1e9))
     }
 
-    /// The name as the iPhone home screen shows it: nil when it fits, else the text with an ellipsis where it would be cut (an estimate: about 11–12 characters).
+    /// The name as the iPhone home screen shows it: nil when it fits, else the text with an ellipsis where it would be cut (an estimate by width, not by character count; calibrated on an iPhone Duo: "Cursed to Golf" fits and "Echoes of Wisdom" shows as "Echoes of Wisd…").
     func truncatedLabel(_ t: String) -> String? {
         let font = NSFont.systemFont(ofSize: 12, weight: .medium)
         func width(_ s: String) -> CGFloat { (s as NSString).size(withAttributes: [.font: font]).width }
-        let maxW: CGFloat = 68
+        let maxW: CGFloat = 103   // measured on the user's iPhone Duo: "Cursed to Golf" (83.8) fits and "Echoes of Wisdom" shows as "Echoes of Wisd…", so the limit is between 99.6 and 106.7 in this font; the middle
         if width(t) <= maxW { return nil }
         var s = t
         while !s.isEmpty && width(s + "…") > maxW { s.removeLast() }
