@@ -109,6 +109,13 @@ struct SetupSection: View {
                         Button("Browse…") { if let p = m.pick(folder: true, title: "Local folder for the work copies", start: m.workRoot) { m.cacheDir = p } }
                     }
                 }
+                HStack {
+                    Text(m.workLeftCount == 0 ? "No leftover copies in the work folder." : String(format: "%d leftover copy(ies), %.1f GB, from an interrupted run.", m.workLeftCount, Double(m.workLeft) / 1e9))
+                        .font(.caption).foregroundColor(m.workLeftCount == 0 ? .secondary : .orange)
+                    Spacer()
+                    Button("Show in Finder") { NSWorkspace.shared.open(URL(fileURLWithPath: m.workRoot)) }.disabled(!FileManager.default.fileExists(atPath: m.workRoot))
+                    Button("Clear work folder…") { Task { await m.clearWorkFolder() } }.disabled(!m.busy.isEmpty)
+                }.onAppear { m.checkWorkFolder() }
             }
             Divider()
             HStack {

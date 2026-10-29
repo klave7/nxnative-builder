@@ -167,6 +167,7 @@ final class AppModel: ObservableObject {
             nextId = (jobs.map { $0.id }.max() ?? -1) + 1
         }
         loaded = true
+        checkWorkFolder()
         Task { await refresh() }
         Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { _ in
             Task { @MainActor in if !self.setupDone && self.busy.isEmpty && self.question == nil { await self.refresh() } }
@@ -200,6 +201,8 @@ final class AppModel: ObservableObject {
 
     // MARK: running commands
     /// Runs a command, copying its output to the log. It leads its own process group, so Stop reaches everything it started.
+    @Published var workLeft = 0
+    @Published var workLeftCount = 0
     @Published var scanning = false
     @Published var scanned = false   // the folder is listed only when asked: at launch a sleeping drive would freeze the app
     var streamText = ""   // the output of the last command, for failureReason
@@ -658,6 +661,37 @@ final class AppModel: ObservableObject {
             clean(folder: job.folder, ipa: ipa, since: started, built: status == "done")
         }
         return (status, why)
+    }
+
+    /// The copies a crashed or killed run left in the work folder: only job-<n> folders, so a work folder chosen by mistake as a real one is never emptied.
+    nonisolated static func leftoverCopies(_ root: String) -> [(path: String, bytes: Int)] {
+        let fm = FileManager.default
+        return ((try? fm.contentsOfDirectory(atPath: root)) ?? []).filter { $0.range(of: #"^job-\d+$"#, options: .regularExpression) != nil }.sorted().map { n in
+            let p = root + "/" + n
+            var bytes = 0
+            if let e = fm.enumerator(at: URL(fileURLWithPath: p), includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey]) {
+                for case let u as URL in e { let v = try? u.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]); if v?.isSymbolicLink != true { bytes += v?.fileSize ?? 0 } }
+            }
+            return (p, bytes)
+        }
+    }
+
+    func checkWorkFolder() {
+        let root = workRoot
+        Task { let r = await Task.detached { AppModel.leftoverCopies(root) }.value; workLeft = r.map { $0.bytes }.reduce(0, +); workLeftCount = r.count }
+    }
+
+    func clearWorkFolder() async {
+        let root = workRoot
+        let found = await Task.detached { AppModel.leftoverCopies(root) }.value
+        guard !found.isEmpty else { workLeft = 0; workLeftCount = 0; message = "The work folder has nothing left over."; return }
+        let gb = String(format: "%.1f GB", Double(found.map { $0.bytes }.reduce(0, +)) / 1e9)
+        guard await ask("Delete the leftover work copies?", "Deletes \(found.count) folder(s), \(gb), at once (not to the Trash):\n" + found.map { $0.path }.joined(separator: "\n"), ok: "Delete") else { return }
+        await work("Clearing the work folder") {
+            for f in found { say("Deleting \(f.path) …\n"); _ = await stream(["/bin/rm", "-rf", f.path]) }
+            say("Work folder cleared.\n")
+        }
+        checkWorkFolder()
     }
 
     nonisolated static func onLocalVolume(_ path: String) -> Bool {
