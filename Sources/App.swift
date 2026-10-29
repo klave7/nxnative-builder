@@ -208,7 +208,7 @@ struct QueueSection: View {
             }
             if !m.gamesFolder.isEmpty {
                 HStack {
-                    Text(m.found.isEmpty ? "No subfolders with game files (NSP, NSZ, XCI, XCZ) found." : "\(m.found.count) game folder(s) found. Name each one and add it to the queue.").font(.caption).foregroundColor(.secondary)
+                    Text(m.scanning ? "Scanning the games folder…" : m.found.isEmpty ? "No subfolders with game files (NSP, NSZ, XCI, XCZ) found." : "\(m.found.count) game folder(s) found. Name each one and add it to the queue.").font(.caption).foregroundColor(.secondary)
                     Spacer()
                     Button("Rescan") { m.scanGames() }
                 }

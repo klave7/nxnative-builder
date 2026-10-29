@@ -195,6 +195,7 @@ final class AppModel: ObservableObject {
 
     // MARK: running commands
     /// Runs a command, copying its output to the log. It leads its own process group, so Stop reaches everything it started.
+    @Published var scanning = false
     var streamText = ""   // the output of the last command, for failureReason
 
     /// One sentence on why a build failed, from the script's output: the step that failed (its ✗ line) and the last Python exception, FAIL: line or [RED] line after it.
@@ -447,17 +448,30 @@ final class AppModel: ObservableObject {
         jobs.append(Job(id: nextId, folder: newFolder, name: name)); nextId += 1
         newFolder = ""; newName = ""; message = ""; save()
     }
+    /// Lists the game folders in the background: a sleeping or slow external drive must not freeze the window.
     func scanGames() {
+        let path = gamesFolder
         found = []
-        guard !gamesFolder.isEmpty, let subs = try? FileManager.default.contentsOfDirectory(atPath: gamesFolder) else { return }
+        guard !path.isEmpty else { return }
+        scanning = true
+        Task {
+            let r = await Task.detached { AppModel.scan(path) }.value
+            if path == gamesFolder { found = r }
+            scanning = false
+        }
+    }
+    nonisolated static func scan(_ gamesFolder: String) -> [FoundGame] {
+        var out: [FoundGame] = []
+        guard let subs = try? FileManager.default.contentsOfDirectory(atPath: gamesFolder) else { return out }
         let exts: Set<String> = ["nsp", "nsz", "xci", "xcz"]
         for n in subs.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) where !n.hasPrefix(".") {
             let p = gamesFolder + "/" + n
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue else { continue }
             let count = ((try? FileManager.default.contentsOfDirectory(atPath: p)) ?? []).filter { exts.contains(($0 as NSString).pathExtension.lowercased()) }.count
-            if count > 0 { found.append(FoundGame(path: p, folder: n, files: count)) }
+            if count > 0 { out.append(FoundGame(path: p, folder: n, files: count)) }
         }
+        return out
     }
     func isQueued(_ g: FoundGame) -> Bool { jobs.contains { $0.folder == g.path } }
     func addFound(_ g: FoundGame) {
