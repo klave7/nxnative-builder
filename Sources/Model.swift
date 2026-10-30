@@ -719,6 +719,12 @@ final class AppModel: ObservableObject {
         jobs.swapAt(i, i + d); save()
     }
 
+    /// While a queue runs: tells macOS this is work the user started, so it does not slow the app (and the build it launched) down when the window is in the background, and does not
+    /// put the Mac to sleep partway through (the display may still sleep).
+    private var activity: NSObjectProtocol?
+    func holdActivity() { if activity == nil { activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Building IPA files") } }
+    func releaseActivity() { if let a = activity { ProcessInfo.processInfo.endActivity(a); activity = nil } }
+
     func runQueue() async {
         guard FileManager.default.fileExists(atPath: keys) else { message = "Set the path of prod.keys."; return }
         guard !out.isEmpty else { message = "Choose the output folder for the IPA files."; return }
@@ -729,6 +735,8 @@ final class AppModel: ObservableObject {
         guard await ask("Process the queue?", "Builds \(n) game(s) in order and writes each IPA to \(out). The output folder is created if it is missing."
                         + (localCache ? " Games on a network drive are copied to \(workRoot), built there, and the copy deleted afterwards." : "") + (cleanup ? " After each build, whether it succeeds, fails or is stopped, its build folders in the NSP folder are deleted." : ""), ok: "Start") else { return }
         for i in jobs.indices where jobs[i].status == "failed" || jobs[i].status == "stopped" { jobs[i].status = "waiting" }
+        holdActivity()
+        defer { releaseActivity() }
         await work("Building the queue") {
             try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
             while !stopFlag, let i = jobs.firstIndex(where: { $0.status == "waiting" }) {
