@@ -1,74 +1,43 @@
-From 03023822abe64208c7cb8acbc202ccc51bedb9ec Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: klave7 <5594473+klave7@users.noreply.github.com>
-Date: Wed, 28 Oct 2026 15:11:43 -0600
-Subject: [PATCH 2/3] In-game control editor
+Date: Fri, 30 Oct 2026 12:00:00 -0600
+Subject: [PATCH] In-game control editor
 
-Press and hold the layout button (or turn on "Edit controls at start" on the
-settings screen) to open an editor: drag each control, size it with a slider,
-and switch it off or on. Positions and sizes are kept per game as offsets from
-the built-in layout; which controls are on is kept per layout (2D, 3D), so the
-D-pad, L3 and R3 can be shown in 2D and the stick hidden. Off controls take no
-touches. New launcher setting DM_PAD_EDIT (iOS only); docs and the settings
-test updated.
-
-Compile-checked for the iPhone SDK; not yet run on a device.
-
-Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- dm/games/settings.tsv                    |   1 +
- dm/ios/Sources/DmGamepad.m               | 238 ++++++++++++++++++++---
- dm/tools/tests/test_launcher_settings.py |   2 +-
- docs/env_switches.tsv                    |   1 +
- docs/settings.md                         |  17 +-
- 5 files changed, 226 insertions(+), 33 deletions(-)
-
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index 43fd764..96f1f17 100644
+index bb29206f..c201dbd7 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
-@@ -24,6 +24,7 @@ DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		lev
- DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
- DM_BAR_FILL	choice	off=Black,blur=Blurred picture,image=Still image	blur	platform:ios	Game	Bars around the picture	Fills the bars at the sides or at the top and bottom: black, a dimmed and blurred copy of the picture, or a still image. The blurred picture uses a little more GPU time.
+@@ -25,2 +25,3 @@ DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
  DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 +DM_PAD_EDIT	toggle	-	0	platform:ios	Controls	Edit controls at start	Opens the control editor once when the game starts. You can also press and hold the layout button during play.
  DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
- DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
- DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff
 diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
-index 4bb6f51..ee5195e 100644
+index a079d7f2..46bc26c1 100644
 --- a/dm/ios/Sources/DmGamepad.m
 +++ b/dm/ios/Sources/DmGamepad.m
-@@ -12,6 +12,9 @@
- //   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen (pushGame; Super Mario Galaxy's pointer in handheld mode).
- //   The virtual gamepad (layout button included) hides while a physical controller is connected and comes back when it is removed; meanwhile every touch goes to the game. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller).
+@@ -14,2 +14,5 @@
  //   Each physical controller is a player of its own (local co-op), as on the Mac: the first one connected is player 1, together with the touch gamepad, the next player 2, and so on up to 8; see "Physical controllers" below.
 +//   Edit mode: press and hold the layout button (or turn on "Edit controls at start", DM_PAD_EDIT, on the settings screen) to drag each control where you want it and set its size (a slider);
 +//     the positions are offsets from the built-in layout in u and the sizes factors, shared by the 2D and the 3D layout, kept in NSUserDefaults (DmPadCustom); not offered in the Tap layout.
 +//     Each control can also be switched off (and the D-pad, L3 and R3 on in 2D): the choices are kept per layout (DmPadShown), the built-in ones where there is none. The editor draws a control that is off dimmed, so it can be picked and switched on again; the layout button is always there.
  //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
- #import <UIKit/UIKit.h>
- #import <GameController/GameController.h>
-@@ -29,6 +32,7 @@
- #include <stdatomic.h>
- 
+@@ -32,2 +35,3 @@
  enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
 +enum { E_FACE = 0, E_STICK, E_DPAD, E_ZL, E_L, E_ZR, E_R, E_L3, E_R3, E_MINUS, E_PLUS, E_N };   // the controls the player can move and resize (the diamond, the D-pad and the stick each as a whole)
  enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
- 
- static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-@@ -125,6 +129,9 @@ static void phone_motion_start(UIView *body) {
-     K_RSWIPE = 1.0 / 3,                             // right stick area: this fraction of the screen width from the right edge (not in u)
-     K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
+@@ -128,2 +132,5 @@ static void phone_motion_start(UIView *body) {
  static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 +static NSString *const k_custom_key = @"DmPadCustom";   // NSUserDefaults: E_N triples [dx, dy, size] (dx, dy in u from the built-in place, size a factor); absent = the built-in layout
 +static NSString *const k_shown_key = @"DmPadShown";   // NSUserDefaults: for 2D and 3D, E_N numbers each: 0 = the layout's built-in choice, 1 = on, 2 = off
 +static const CGFloat K_SIZE_MIN = 0.5, K_SIZE_MAX = 1.6;
  static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
- int dm_opmode(void);   // hle_oe.c: 0 = handheld
- double mtl_present_aspect(void);   // nvn_mtl.m: width / height of the picture the last present showed
-@@ -150,6 +157,11 @@ @implementation DmGamepad {
-     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
-     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
+@@ -131,3 +138,3 @@ static void phone_motion_start(UIView *body) {
+ 
+-@interface DmGamepad : UIView
++@interface DmGamepad : UIView <UIGestureRecognizerDelegate>
+ @end
+@@ -152,2 +159,7 @@ @implementation DmGamepad {
      UITouch *_game[16];                            // touches on the game's touch screen by finger slot
 +    float _dx[E_N], _dy[E_N], _sz[E_N];            // the player's offset (u) and size factor of each control
 +    BOOL _edit; int _sel;                          // the editor is open / the control being edited (-1 none)
@@ -76,19 +45,11 @@ index 4bb6f51..ee5195e 100644
 +    UIView *_panel; UILabel *_selLabel; UISlider *_slider; UISwitch *_showSwitch;
 +    signed char _vis[2][E_N];                      // per layout (2D, 3D): 0 = built-in choice, 1 = the player turned the control on, 2 = off
  }
- 
- static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
-@@ -164,7 +176,6 @@ @implementation DmGamepad {
-     t.string = s; t.alignmentMode = kCAAlignmentCenter; t.foregroundColor = k_text.CGColor; t.contentsScale = UIScreen.mainScreen.scale;
-     [parent addSublayer:t]; return t;
+@@ -166,3 +178,2 @@ @implementation DmGamepad {
  }
 -static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   // keys shown only in the 3D layout
  
- - (instancetype)initWithFrame:(CGRect)f {
-     if ((self = [super initWithFrame:f])) {
-@@ -195,8 +206,13 @@ - (instancetype)initWithFrame:(CGRect)f {
-         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
-         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
+@@ -197,4 +208,9 @@ - (instancetype)initWithFrame:(CGRect)f {
          if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
 -        _full = l == 1; _tap = l == 2;
 +        _full = l == 1; _tap = l == 2; _sel = -1;
@@ -96,14 +57,10 @@ index 4bb6f51..ee5195e 100644
 +        [self loadCustom];
 +        [self loadShown];
          [self applyLayout];
-+        UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(holdSwap:)]; hold.minimumPressDuration = 0.7;
++        UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(holdSwap:)]; hold.minimumPressDuration = 0.7; hold.delegate = self;
 +        [self addGestureRecognizer:hold];   // press and hold the layout button: the editor (it cancels the touch, so the release does not change the layout)
          NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidConnectNotification object:nil];
-         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidDisconnectNotification object:nil];
-@@ -204,13 +220,18 @@ - (instancetype)initWithFrame:(CGRect)f {
-         [self padsChanged:nil];
-         motion_start();
+@@ -206,2 +222,7 @@ - (instancetype)initWithFrame:(CGRect)f {
          phone_motion_start(self);
 +        const char *ed = getenv("DM_PAD_EDIT");
 +        if (ed && atoi(ed)) {   // "Edit controls at start": once (the saved choice is forgotten, so the next start plays)
@@ -111,20 +68,14 @@ index 4bb6f51..ee5195e 100644
 +            dispatch_async(dispatch_get_main_queue(), ^{ [self enterEdit]; });
 +        }
      }
-     return self;
- }
- - (void)applyLayout {   // show / hide the controls for the current layout
+@@ -211,4 +232,4 @@ - (void)applyLayout {   // show / hide the controls for the current layout
      [CATransaction begin]; [CATransaction setDisableActions:YES];
 -    for (int b = 0; b < B_N; b++) _key[b].hidden = _tap || (fullOnly(b) && !_full);
 -    _ring.hidden = _knob.hidden = _tap;
 +    for (int b = 0; b < B_N; b++) { BOOL on = [self on:keyElem(b)]; _key[b].hidden = _tap || (!on && !_edit); _key[b].opacity = on ? 1 : 0.3; }   // the editor shows a control that is off, dimmed
 +    BOOL son = [self on:E_STICK]; _ring.hidden = _tap || (!son && !_edit); _knob.hidden = _tap || !son; _ring.opacity = son ? 1 : 0.3;
      _swapLabel.string = _tap ? @"Tap" : _full ? @"3D" : @"2D";
-     [CATransaction commit];
- }
-@@ -227,25 +248,36 @@ - (CGRect)safe { return UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
- - (CGRect)corner { UIEdgeInsets i = self.safeAreaInsets; i.left *= K_CORNER_IN; i.right *= K_CORNER_IN; return UIEdgeInsetsInsetRect(self.bounds, i); }   // the rectangle the bottom-corner controls use
- - (CGFloat)u { return MIN(self.bounds.size.height / 430.0, 1.3); }   // 1 = 430 points tall (iPhone Pro Max landscape)
+@@ -229,13 +250,23 @@ - (CGFloat)u { return MIN(self.bounds.size.height / 430.0, 1.3); }   // 1 = 430
  static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPointMake(right ? CGRectGetMaxX(s) - dx : CGRectGetMinX(s) + dx, y); }
 -- (CGPoint)faceCenter { CGRect s = self.corner; CGFloat u = self.u; return side(s, 1, K_FACE_X * u, CGRectGetMaxY(s) - K_PAD_Y * u); }
 -- (CGFloat)faceGap { return K_FACE_GAP * self.u; }
@@ -155,7 +106,7 @@ index 4bb6f51..ee5195e 100644
 +- (CGPoint)dpadCenter { CGRect s = self.corner; CGFloat u = self.u; return add(side(s, 0, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u), [self off:E_DPAD]); }
 +- (CGFloat)dpadR { return K_DPAD_R * self.u * [self sc:E_DPAD]; }
  static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
- static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
+@@ -243,7 +274,8 @@ - (CGFloat)dpadR { return K_DPAD_R * self.u; }
  - (CGPoint)dropCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; BOOL z = b == B_ZL || b == B_ZR;
 -    return side(s, b == B_ZR || b == B_R, (z ? K_ZL_X : K_L_X) * u, CGRectGetMinY(s) + (z ? K_ZL_Y : K_L_Y) * u); }
 -- (CGFloat)dropR:(int)b { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * self.u; }
@@ -169,11 +120,7 @@ index 4bb6f51..ee5195e 100644
 +- (CGRect)pillRect:(int)b { CGRect s = self.safe; CGFloat u = self.u, k = [self sc:elemOf(b)], w = K_PILL_W * u * k, h = K_PILL_H * u * k;
 +    CGPoint c = add(CGPointMake(CGRectGetMidX(s) + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u, CGRectGetMinY(s) + K_PILL_Y * u), [self off:elemOf(b)]);   // − on the left, + on the right
      return CGRectMake(c.x - w / 2, c.y - h / 2, w, h); }
- - (CGPoint)swapCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s), CGRectGetMinY(s) + K_PILL_Y * self.u); }
- 
-@@ -253,9 +285,9 @@ - (CGPoint)swapCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s
- - (int)btnAt:(CGPoint)p {   // locked keys (tested on touch-down only, then locked)
-     CGFloat u = self.u;
+@@ -255,5 +287,5 @@ - (int)btnAt:(CGPoint)p {   // locked keys (tested on touch-down only, then lock
      for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
 -        if (fullOnly(b) && !_full) continue;
 +        if (![self on:elemOf(b)]) continue;
@@ -181,19 +128,11 @@ index 4bb6f51..ee5195e 100644
 -                 : isClick(b) ? dist(p, [self clickCenter:b]) <= K_CLICK_R * u * 1.35
 +                 : isClick(b) ? dist(p, [self clickCenter:b]) <= [self clickR:b] * 1.35
                   : CGRectContainsPoint(CGRectInset([self pillRect:b], -8 * u, -8 * u), p);
-         if (hit) return b; }
-     return -1;
-@@ -334,6 +366,7 @@ - (BOOL)gameBegin:(UITouch *)t {
-     return NO;
- }
+@@ -335,2 +367,3 @@ - (BOOL)gameBegin:(UITouch *)t {
  - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
 +    if (_edit) { [self editBegan:ts]; return; }
      BOOL game = NO;
-     for (UITouch *t in ts) {
-         if (_padOff) { game |= [self gameBegin:t]; continue; }
-@@ -343,9 +376,9 @@ - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
-         if (_tap) { game |= [self gameBegin:t]; continue; }
-         // diamond, D-pad, left stick: take the one with the smallest distance / grab radius, if it is <= 1
+@@ -344,5 +377,5 @@ - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
          CGFloat best = 1; int kind = C_NONE, idx = 0;
 -        CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; }
 -        if (_full) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
@@ -202,27 +141,15 @@ index 4bb6f51..ee5195e 100644
 +        if ([self on:E_DPAD]) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
 +        if (!_stick[0] && [self on:E_STICK]) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
          if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
-         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
-         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
-@@ -356,6 +389,7 @@ - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
-     [self recompute];
- }
+@@ -357,2 +390,3 @@ - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
  - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
 +    if (_edit) { [self editMoved:ts]; return; }
      BOOL game = NO;
-     for (UITouch *t in ts) {
-         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff); CGPoint p = [t locationInView:self];
-@@ -369,6 +403,7 @@ - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
-     [self recompute];
- }
+@@ -370,2 +404,3 @@ - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
  - (void)endTouches:(NSSet<UITouch *> *)ts tapped:(BOOL)ended {
 +    if (_edit) { [self editEnded:ts]; return; }
      BOOL swap = NO, game = NO;
-     for (UITouch *t in ts) {
-         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue;
-@@ -384,6 +419,147 @@ - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTo
- - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
- - (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+@@ -385,2 +420,146 @@ - (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0]
  
 +// ---- Editor ----
 +// A finger drags the control it lands on (the one whose grab radius it is nearest to); the panel's slider sizes the selected control. Nothing reaches the game meanwhile.
@@ -250,6 +177,9 @@ index 4bb6f51..ee5195e 100644
 +    for (int e = 0; e < E_N; e++) { CGFloat d = dist(p, [self centreOf:e]) / [self reachOf:e]; if (d < bd) { bd = d; best = e; } }
 +    return best;
 +}
++// The hold recognizer sees every touch on the pad, and a recognized long press cancels the touches it is in (cancelsTouchesInView): without this it would release any control held for 0.7 s
++// (holding a button to skip a cutscene stopped after a moment). It may begin only on the layout button, whose touch the editor takes over.
++- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g { return !_edit && [self inSwap:[g locationInView:self]]; }
 +- (void)holdSwap:(UILongPressGestureRecognizer *)g {
 +    if (g.state == UIGestureRecognizerStateBegan && !_edit && [self inSwap:[g locationInView:self]]) [self enterEdit];
 +}
@@ -366,16 +296,12 @@ index 4bb6f51..ee5195e 100644
 +}
 +
  // ---- Shapes ----
- static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
- static CGPathRef dropPath(CGPoint c, CGFloat r, CGFloat tipAngle, CGFloat round) {   // teardrop: circle + two tangents meeting at the tip, tip slightly rounded
-@@ -420,27 +596,29 @@ - (void)layoutSubviews {
-     CGFloat u = self.u;
-     [CATransaction begin]; [CATransaction setDisableActions:YES];
+@@ -421,3 +600,3 @@ - (void)layoutSubviews {
      _controls.frame = self.layer.bounds;
 -    for (int b = B_A; b <= B_Y; b++) { CGPoint c = [self facePos:b]; setPath(_key[b], circlePath(c, self.faceR)); placeLabel(_label[b], c, 20 * u); }
 +    for (int b = B_A; b <= B_Y; b++) { CGPoint c = [self facePos:b]; setPath(_key[b], circlePath(c, self.faceR)); placeLabel(_label[b], c, 20 * u * [self sc:E_FACE]); }
      for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
-         if (isDrop(b)) {
+@@ -425,8 +604,8 @@ - (void)layoutSubviews {
              BOOL right = b == B_ZR || b == B_R; CGPoint c = [self dropCenter:b];
 -            setPath(_key[b], dropPath(c, [self dropR:b], right ? -M_PI_4 : -3 * M_PI_4, 4 * u)); placeLabel(_label[b], c, 16 * u);   // tip toward the near top corner
 +            CGFloat k = [self sc:elemOf(b)]; setPath(_key[b], dropPath(c, [self dropR:b], right ? -M_PI_4 : -3 * M_PI_4, 4 * u * k)); placeLabel(_label[b], c, 16 * u * k);   // tip toward the near top corner
@@ -387,7 +313,7 @@ index 4bb6f51..ee5195e 100644
 -            setPath(_key[b], CGPathCreateWithRoundedRect(rc, rc.size.height / 2, rc.size.height / 2, NULL)); placeLabel(_label[b], CGPointMake(CGRectGetMidX(rc), CGRectGetMidY(rc)), 18 * u);
 +            setPath(_key[b], CGPathCreateWithRoundedRect(rc, rc.size.height / 2, rc.size.height / 2, NULL)); placeLabel(_label[b], CGPointMake(CGRectGetMidX(rc), CGRectGetMidY(rc)), 18 * u * [self sc:elemOf(b)]);
          }
-     }
+@@ -434,6 +613,7 @@ - (void)layoutSubviews {
      static const struct { int b; CGFloat angle; } arms[] = {{B_UP, 0}, {B_RIGHT, M_PI_2}, {B_DOWN, M_PI}, {B_LEFT, -M_PI_2}};   // the same arm in 90° steps
 -    for (int i = 0; i < 4; i++) setPath(_key[arms[i].b], armPath(self.dpadCenter, self.dpadR, K_ARM_W * u, K_ARM_IN * u, arms[i].angle, 6 * u));
 +    CGFloat ds = [self sc:E_DPAD];
@@ -397,83 +323,54 @@ index 4bb6f51..ee5195e 100644
 -    CGFloat k = K_KNOB_R * u; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
 +    CGFloat k = K_KNOB_R * u * [self sc:E_STICK]; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
      setPath(_knob, circlePath(CGPointMake(k, k), k));
-     CAShapeLayer *in = (CAShapeLayer *)_knob.sublayers.firstObject; CGPathRef ip = circlePath(CGPointMake(k, k), k * 0.62);
-     in.frame = _knob.bounds; in.path = ip; CGPathRelease(ip);
+@@ -442,2 +622,3 @@ - (void)layoutSubviews {
      [CATransaction commit];
 +    [self layoutEditor];
      [self refresh];
- }
- - (void)safeAreaInsetsDidChange { [super safeAreaInsetsDidChange]; [self setNeedsLayout]; }
-@@ -448,7 +626,9 @@ - (void)refresh {   // pressed state → fill, sticks → knob position
-     uint64_t all = _faceBits | _dpadBits | _btnBits;
-     [CATransaction begin]; [CATransaction setDisableActions:YES];
+@@ -449,3 +630,5 @@ - (void)refresh {   // pressed state → fill, sticks → knob position
      for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
 -        _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
 +        _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor;
 +        BOOL sel = _edit && keyElem(b) == _sel; _key[b].strokeColor = (sel ? UIColor.whiteColor : k_line).CGColor; _key[b].lineWidth = sel ? 3.5 : 1.5; }
 +    BOOL ss = _edit && _sel == E_STICK; _ring.strokeColor = (ss ? UIColor.whiteColor : k_line).CGColor; _ring.lineWidth = ss ? 3.5 : 1.5;
      _swap.fillColor = (_swapHeld ? k_on : k_idle).CGColor; _swapLabel.foregroundColor = (_swapHeld ? k_textOn : k_text).CGColor;
-     CGPoint h = self.stickHome, o = [self knobOffset:0];
-     _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
-@@ -525,7 +705,7 @@ - (void)padsChanged:(NSNotification *)note {
-     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
-     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
+@@ -526,3 +709,3 @@ - (void)padsChanged:(NSNotification *)note {
      BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
 -    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
 +    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; if (any) [self leaveEdit]; [self reset]; });   // the touch gamepad hides while any controller is in use
  }
- @end
- 
 diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
-index 3a14e38..9c849a5 100644
+index cd43d2d7..0e333707 100644
 --- a/dm/tools/tests/test_launcher_settings.py
 +++ b/dm/tools/tests/test_launcher_settings.py
-@@ -62,7 +62,7 @@ class LauncherSettingsTests(unittest.TestCase):
-     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
-         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
+@@ -64,3 +64,3 @@ class LauncherSettingsTests(unittest.TestCase):
          self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
--        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_BAR_FILL'})
-+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_BAR_FILL', 'DM_PAD_EDIT'})
+-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
++        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PAD_EDIT'})
          self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})   # the Mac window's Display mode (front_mac.m reads 1 or 0)
-         s = mac['DM_FULLSCREEN']
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 1e91a92..22cc404 100644
+index 82ed6ed9..34d60e8c 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -187,6 +187,7 @@ DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on e
- DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
- DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
+@@ -188,2 +188,3 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
  DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 +DM_PAD_EDIT	player	`1` opens the on-screen control editor once when the game starts (iOS); launcher setting, **Edit controls at start**
  DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
- DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
- DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
 diff --git a/docs/settings.md b/docs/settings.md
-index a4da1fa..91dfe6f 100644
+index 833bd442..19fb81a0 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
- 
- - [Tested defaults](#tested-defaults)
- - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter), [Bars around the picture](#bars-around-the-picture)
+@@ -6,3 +6,3 @@ The screen before the game starts shows the settings the game supports. A settin
+ - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
 -- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 +- [Controls](#controls): [Touch feedback](#touch-feedback), [Edit controls at start](#edit-controls-at-start), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
  - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
- - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
- - [Settings in a file](#settings-in-a-file)
-@@ -15,7 +15,7 @@ Each game comes with the settings it was tested with: its profile in this reposi
+@@ -18,3 +18,3 @@ When you change a setting and tap **Play**, the app keeps your choice, also when
  
- When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom sets every setting back to its default, and **Play** then forgets your choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
+-A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter and Touch feedback, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
++A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter, Touch feedback and Edit controls at start, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
  
--A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter, Touch feedback and Bars around the picture, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
-+A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter, Touch feedback, Bars around the picture and Edit controls at start, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
- 
- ## Game
- 
-@@ -74,6 +74,16 @@ The picture itself is never stretched or cropped, and the on-screen controls sta
- 
- A light tap from the phone when you press an on-screen button.
+@@ -67,2 +67,12 @@ A light tap from the phone when you press an on-screen button.
  
 +### Edit controls at start
 +
@@ -486,25 +383,12 @@ index a4da1fa..91dfe6f 100644
 +Positions are measured from the built-in layout, so a layout you make fits other screen sizes too. Positions and sizes are kept per game and shared by 2D and 3D; which controls are on is kept separately for each layout. The Tap layout has no controls, so there is nothing to edit there. The editor is not available while a controller is connected.
 +
  ### Game rumble
+@@ -185,3 +195,3 @@ Sets every setting back to the game's tested default; **Play** then forgets your
  
- The game's vibration, on the phone or on a connected controller.
-@@ -192,7 +202,7 @@ Sets every setting back to the game's tested default; **Play** then forgets your
+-A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter** and **Touch feedback** are only on the iPhone.
++A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter**, **Touch feedback** and **Edit controls at start** are only on the iPhone.
  
- ## The Mac settings window
- 
--A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter**, **Touch feedback** and **Bars around the picture** are only on the iPhone.
-+A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter**, **Touch feedback**, **Bars around the picture** and **Edit controls at start** are only on the iPhone.
- 
- Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing the window ends the app without the game. The app remembers your choices for that game, and a game started without the window, from a front end or with the window turned off, uses them too ([Saved choices](frontends.md#saved-choices)). A setting fixed by an `env.txt` or by the program that started the app is shown greyed out.
- 
-@@ -231,6 +241,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
- | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
- | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
+@@ -227,2 +237,3 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
  | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 +| Edit controls at start | `DM_PAD_EDIT` | `1`, `0` |
  | Game rumble | `DM_RUMBLE` | `1`, `0` |
- | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
- | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
--- 
-2.54.0 (Apple Git-157)
-

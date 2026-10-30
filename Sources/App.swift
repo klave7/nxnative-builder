@@ -193,7 +193,7 @@ struct SourceSection: View {
 struct PatchesSection: View {
     @EnvironmentObject var m: AppModel
     var body: some View {
-        Card(title: "Patches", subtitle: "your changes on top of Seedds' code; apply them in order") {
+        Card(title: "Patches", subtitle: "your changes on top of Seedds' code; each one can be applied or removed on its own") {
             if !m.repoReady { Text("Download Seedds nxnative above first.").foregroundColor(.secondary) }
             if m.patches.isEmpty { Text("No patches found.").foregroundColor(.secondary) }
             ForEach(m.patches) { p in
@@ -204,7 +204,7 @@ struct PatchesSection: View {
                         switch p.state {
                         case .applied: Text(p.note.isEmpty ? "Applied" : "Applied; " + p.note).font(.caption).foregroundColor(p.note.isEmpty ? .green : .orange)
                         case .conflict: Text("Does not fit this version of nxnative (Seedds changed the same code).").font(.caption).foregroundColor(.red)
-                        case .locked: Text("Apply the patch above first.").font(.caption).foregroundColor(.secondary)
+                        case .locked: Text("Needs " + p.requires.map { r in m.patches.first { $0.name.hasPrefix(r) }?.title ?? r }.joined(separator: " and ") + " first.").font(.caption).foregroundColor(.secondary)
                         default: EmptyView()
                         }
                     }

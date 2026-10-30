@@ -1,75 +1,31 @@
-From e98ac7670c7b35aaf7b74cea5b7debb40b6e62fa Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: klave7 <5594473+klave7@users.noreply.github.com>
-Date: Wed, 28 Oct 2026 18:13:30 -0600
-Subject: [PATCH 1/3] Blurred bars around the picture image
+Date: Fri, 30 Oct 2026 12:00:00 -0600
+Subject: [PATCH] Blurred bars around the picture
 
-New iOS setting "Bars around the picture" (DM_BAR_FILL): Black, Blurred picture
-(default) or Still image. A screen that is not 16:9 shows the game's picture
-with bars; they now show a dimmed, blurred copy of the picture or
-bar_background.jpg instead of black. The picture is never stretched or cropped.
-
-The fill is drawn in the Metal 4 present pass (present_encode_m4, nvn_mtl.m), so
-it applies to every game, NVN or Vulkan: the picture's valid rectangle is drawn
-into a small texture, blurred along x and y, and drawn dimmed over the whole
-canvas before the sharp picture. It also works through MetalFX (the scaled
-picture is what is blurred). A screenshot's present keeps black bars. The game
-view is the whole screen while a fill is on, and the touch mapping follows the
-picture as the present drew it (mtl_present_aspect).
-
-bar_background.jpg is an image generated with Gemini by the repository's author.
-
-Tested on an iPhone Duo with Super Mario Galaxy, closed and open, Standard and
-MetalFX upscaling; not tested on other devices or games.
-
-Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- dm/games/settings.tsv                    |   1 +
- dm/gfx/nvn/nvn_mtl.m                     | 111 +++++++++++++++++++++--
- dm/ios/Sources/DmGamepad.m               |   4 +-
- dm/ios/Sources/bar_background.jpg        | Bin 0 -> 247709 bytes
- dm/ios/Sources/front_ios.m               |  11 ++-
- dm/tools/tests/test_launcher_settings.py |   2 +-
- docs/env_switches.tsv                    |   1 +
- docs/settings.md                         |  17 +++-
- 8 files changed, 132 insertions(+), 15 deletions(-)
- create mode 100644 dm/ios/Sources/bar_background.jpg
-
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index bb29206..43fd764 100644
+index bb29206f..43fd7649 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
-@@ -22,6 +22,7 @@ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling
- DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
- DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
+@@ -24,2 +24,3 @@ DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		lev
  DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 +DM_BAR_FILL	choice	off=Black,blur=Blurred picture,image=Still image	blur	platform:ios	Game	Bars around the picture	Fills the bars at the sides or at the top and bottom: black, a dimmed and blurred copy of the picture, or a still image. The blurred picture uses a little more GPU time.
  DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
- DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
- DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 1a9bf5a..e5fdc97 100644
+index bfec8674..f841da34 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
-@@ -453,7 +453,7 @@ void mtl_init(void) {
-     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
-     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
+@@ -459,3 +459,3 @@ void mtl_init(void) {
      for (int i = 0; i < 3; i++) {
 -        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
 +        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];   // 8 floats for the picture's crop, 8 for the bars' image (present_encode_m4)
          if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
-         res_add(g_present_uv[i]);
-     }
-@@ -10549,6 +10549,7 @@ void mtl_exec(const uint8_t *p) {
- // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
- static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
+@@ -10761,2 +10761,3 @@ void mtl_exec(const uint8_t *p) {
  static id<MTLSamplerState> g_blit_samp;
 +static id<MTLRenderPipelineState> g_bar_blurh_pso, g_bar_blurv_pso, g_bar_dim_pso;   // the bars' blurred fill (present_pipeline, bar_prepare_m4)
  static uint64_t g_present_n;
- uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
- void mtl_res_snapshot(mtl_res_count *out) {
-@@ -10892,7 +10893,12 @@ static void present_pipeline(MTLPixelFormat format) {
-             "struct V { float4 p [[position]]; float2 uv; };\n"
-             "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
+@@ -11104,3 +11105,8 @@ static void present_pipeline(MTLPixelFormat format) {
              "struct Crop { float4 rect; float4 edge; };\n"
 -            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
 +            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n"
@@ -79,22 +35,14 @@ index 1a9bf5a..e5fdc97 100644
 +            "fragment float4 fs_blurv(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return blur9(t, s, in.uv, float2(0, 2.0 / t.get_height())); }\n"
 +            "fragment float4 fs_dim(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return float4(t.sample(s, in.uv).rgb * 0.5, 1); }\n";
          NSError *e = nil;
-         id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
-         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
-@@ -10901,6 +10907,10 @@ static void present_pipeline(MTLPixelFormat format) {
-         pd.colorAttachments[0].pixelFormat = format;
-         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+@@ -11113,2 +11119,6 @@ static void present_pipeline(MTLPixelFormat format) {
          if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_blurh"]; g_bar_blurh_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_blurv"]; g_bar_blurv_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_dim"]; g_bar_dim_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        if (!g_bar_blurh_pso || !g_bar_blurv_pso || !g_bar_dim_pso) MDIE("present bar pipelines failed %s", e.localizedDescription.UTF8String);
          g_blit_fmt = format;
-         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
-         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
-@@ -11037,6 +11047,76 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
-     [fx->sc encodeToCommandBuffer:cb];
-     return fx->out;
+@@ -11249,2 +11259,72 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
  }
 +// DM_BAR_FILL=blur: the bars around a letterboxed picture show a dimmed, blurred copy of it (the settings screen's "Bars around the picture"). The picture's valid rectangle is drawn into a small
 +// texture of the canvas's shape (128 wide), blurred along x and then y (taps two texels apart, so the blur spreads far and the texture stays small), and present_encode_m4 draws it over the
@@ -167,11 +115,7 @@ index 1a9bf5a..e5fdc97 100644
 +    return bt[0];
 +}
  // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
- // (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)
- static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], id<MTLBuffer> uvb, fx_state *fx) {
-@@ -11045,11 +11125,23 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
-     double dw = dst.width, dh = dst.height;
-     MTLViewport vp = present_viewport(r[2], r[3], dw, dh);
+@@ -11257,7 +11337,19 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
 +    if (r[2] && r[3]) atomic_store_explicit(&g_present_aspect, (double)r[2] / (double)r[3], memory_order_relaxed);
      id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
@@ -192,11 +136,7 @@ index 1a9bf5a..e5fdc97 100644
 -    rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
 +    rp.colorAttachments[0].loadAction = full || bg || img ? MTLLoadActionDontCare : MTLLoadActionClear;   // the bars' fill draws every pixel
      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-     id<MTL4RenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-@@ -11058,11 +11150,14 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
-     [en setArgumentTable:g_present_args atStages:MTLRenderStageFragment];
-     [g_present_args setTexture:tex.gpuResourceID atIndex:0];
+@@ -11270,7 +11362,10 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      [g_present_args setSamplerState:g_blit_samp.gpuResourceID atIndex:0];
 -    float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
 -    uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
@@ -211,39 +151,25 @@ index 1a9bf5a..e5fdc97 100644
 +        [g_present_args setTexture:tex.gpuResourceID atIndex:0]; [g_present_args setAddress:uvb.gpuAddress atIndex:0];
 +    }
      [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
-     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-     m4_end(en);
-@@ -11072,7 +11167,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
- // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
- static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
+@@ -11284,3 +11379,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
      id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
 -    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
 +    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];
      if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
-     id<MTLTexture> raw = present_raw_src(src);
-     fx_state fx = {0};
 diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
-index 2c79941..4bb6f51 100644
+index a079d7f2..7be062a5 100644
 --- a/dm/ios/Sources/DmGamepad.m
 +++ b/dm/ios/Sources/DmGamepad.m
-@@ -127,6 +127,7 @@ static void phone_motion_start(UIView *body) {
- static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
- static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+@@ -130,2 +130,3 @@ static void phone_motion_start(UIView *body) {
  int dm_opmode(void);   // hle_oe.c: 0 = handheld
 +double mtl_present_aspect(void);   // nvn_mtl.m: width / height of the picture the last present showed
  
- @interface DmGamepad : UIView
- @end
-@@ -318,7 +319,8 @@ - (void)recompute {
- - (void)pushGame {
-     CGRect b = self.bounds; CGFloat w = b.size.width, h = b.size.height;
+@@ -321,3 +322,4 @@ - (void)pushGame {
      if (w <= 0 || h <= 0) return;
 -    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
 +    double pa = 16.0 / 9.0; { const char *m = getenv("DM_BAR_FILL"); if (m && (!strcmp(m, "blur") || !strcmp(m, "image")) && mtl_present_aspect() > 0) pa = mtl_present_aspect(); }   // the bars filled: the view is the whole screen and the picture is fitted in it as the present did
 +    if (w / h > pa) w = h * pa; else h = w / pa;
      CGFloat x0 = (b.size.width - w) / 2, y0 = (b.size.height - h) / 2;
-     dm_touch t[16]; int n = 0;
-     for (int i = 0; i < 16; i++) if (_game[i]) {
 diff --git a/dm/ios/Sources/bar_background.jpg b/dm/ios/Sources/bar_background.jpg
 new file mode 100644
 index 0000000000000000000000000000000000000000..393985c83f261a6b5470474bf9ded55ac955990f
@@ -4975,98 +4901,61 @@ literal 0
 HcmV?d00001
 
 diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
-index 4fdb293..5e8fb21 100644
+index 56c8add3..e75e3ee7 100644
 --- a/dm/ios/Sources/front_ios.m
 +++ b/dm/ios/Sources/front_ios.m
-@@ -15,6 +15,7 @@
- UIView *dm_gamepad_view(CGRect frame);
- void dm_gamepad_reset(void);
+@@ -18,2 +18,3 @@
  void dm_gamepad_active(void);
 +void mtl_set_bar_image(CGImageRef img);   // nvn_mtl.m: the still image for the bars (DM_BAR_FILL=image)
  void front_ios_boot(void);
- int front_ios_boot_ok(void);
- const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
-@@ -50,6 +51,7 @@ @interface DmRootVC : UIViewController
- @property (nonatomic, strong) UIView *pad;
- @property (nonatomic, strong) UILabel *fps;
- @property (nonatomic) BOOL launched;
+@@ -66,2 +67,3 @@ @interface DmRootVC : UIViewController
+ @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
 +@property (nonatomic) BOOL fill;   // DM_BAR_FILL=blur or image: the game view is the whole screen, and the present fits the picture in it and fills the bars (nvn_mtl.m)
  - (void)startGame;
- @end
- static DmRootVC *g_root;
-@@ -74,6 +76,10 @@ - (void)startGame {
-     if (self.game) return;
-     dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
+@@ -97,2 +99,6 @@ - (void)startGame {
      front_hud_env();   // before the game view makes its device (an env file's DM_METAL_HUD sets it in main.m already)
 +    { const char *m = getenv("DM_BAR_FILL"); self.fill = m && (!strcmp(m, "blur") || !strcmp(m, "image"));
 +      if (m && !strcmp(m, "image")) {
 +          NSString *path = [NSBundle.mainBundle pathForResource:@"bar_background" ofType:@"jpg"]; UIImage *img = path ? [UIImage imageWithContentsOfFile:path] : nil;
 +          if (img.CGImage) mtl_set_bar_image(img.CGImage); else LOG("[RED] front end: bar_background.jpg is not in the app, the bars stay black"); } }
      self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
-     [self.view addSubview:self.game];
-     g_layer = (CAMetalLayer *)self.game.layer;
-@@ -91,8 +97,9 @@ - (void)startGame {
- - (void)viewDidLayoutSubviews {
-     [super viewDidLayoutSubviews];
+@@ -115,3 +121,3 @@ - (void)viewDidLayoutSubviews {
      CGRect b = self.view.bounds; if (!self.game) return;
--    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen
--    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-+    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen (or, filling the bars, the whole screen: the present letterboxes the picture inside it)
-+    if (self.fill) { /* the whole screen */ }
-+    else if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-     self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
+-    if (self.game.superview == self.view) self.game.frame = fit_16_9(b);   // on a TV the TV's view lays it out
++    if (self.game.superview == self.view) self.game.frame = self.fill ? b : fit_16_9(b);   // on a TV the TV's view lays it out; filling the bars, the phone's picture view is the whole screen and the present letterboxes the picture inside it
      if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
-         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
 diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
-index cd43d2d..3a14e38 100644
+index cd43d2d7..3a14e38f 100644
 --- a/dm/tools/tests/test_launcher_settings.py
 +++ b/dm/tools/tests/test_launcher_settings.py
-@@ -62,7 +62,7 @@ class LauncherSettingsTests(unittest.TestCase):
-     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
-         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
+@@ -64,3 +64,3 @@ class LauncherSettingsTests(unittest.TestCase):
          self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
 -        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
 +        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_BAR_FILL'})
          self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})   # the Mac window's Display mode (front_mac.m reads 1 or 0)
-         s = mac['DM_FULLSCREEN']
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index b8d7259..1e91a92 100644
+index 82ed6ed9..3ffdeb70 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -10,6 +10,7 @@ DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; re
- DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
- DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
+@@ -12,2 +12,3 @@ DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing,
  DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 +DM_BAR_FILL	player	On iOS, `blur` (default; launcher setting **Bars around the picture**) fills the bars around a letterboxed picture with a dimmed, blurred copy of it (the game view is the whole screen and the present draws it, `bar_blur_m4` in `nvn_mtl.m`, also through MetalFX); `image` fills them with `bar_background.jpg` from the app, covering the canvas; `off` leaves them black
  DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
- DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
- DM_COPY_GAME_RESOURCES	switch	`NO` skips the Xcode build phase that copies the game's resources into the app (`stage_resources.sh`, on by default); `build_ipa.sh` sets it for its unsigned build, which packs them itself
 diff --git a/docs/settings.md b/docs/settings.md
-index a1a6059..a4da1fa 100644
+index 833bd442..13d31c63 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -3,7 +3,7 @@
- The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
- 
+@@ -5,3 +5,3 @@ The screen before the game starts shows the settings the game supports. A settin
  - [Tested defaults](#tested-defaults)
 -- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
 +- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter), [Bars around the picture](#bars-around-the-picture)
  - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
- - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
- - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
-@@ -15,7 +15,7 @@ Each game comes with the settings it was tested with: its profile in this reposi
- 
- When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom sets every setting back to its default, and **Play** then forgets your choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
+@@ -18,3 +18,3 @@ When you change a setting and tap **Play**, the app keeps your choice, also when
  
 -A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter and Touch feedback, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
 +A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter, Touch feedback and Bars around the picture, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
  
- ## Game
- 
-@@ -58,6 +58,16 @@ The game's own languages. The app was packed with one of them; pick another here
- 
- Shows the frames per second at the top left.
+@@ -61,2 +61,12 @@ Shows the frames per second at the top left.
  
 +### Bars around the picture
 +
@@ -5079,25 +4968,12 @@ index a1a6059..a4da1fa 100644
 +The picture itself is never stretched or cropped, and the on-screen controls stay where they were. The blurred picture costs a little GPU time (three small passes and a full-screen draw a frame, only while there are bars). Screenshots taken from inside the app show black bars.
 +
  ## Controls
- 
- ### Touch feedback
-@@ -182,7 +192,7 @@ Sets every setting back to the game's tested default; **Play** then forgets your
- 
- ## The Mac settings window
+@@ -185,3 +195,3 @@ Sets every setting back to the game's tested default; **Play** then forgets your
  
 -A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter** and **Touch feedback** are only on the iPhone.
 +A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter**, **Touch feedback** and **Bars around the picture** are only on the iPhone.
  
- Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing the window ends the app without the game. The app remembers your choices for that game, and a game started without the window, from a front end or with the window turned off, uses them too ([Saved choices](frontends.md#saved-choices)). A setting fixed by an `env.txt` or by the program that started the app is shown greyed out.
- 
-@@ -215,6 +225,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
- | Frame rate | `DM_FPS_TARGET` | `30`, `60` |
- | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` |
+@@ -222,2 +232,3 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
  | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 +| Bars around the picture | `DM_BAR_FILL` | `blur`, `image`, `off` |
  | Game language | `DM_LANG` | a language code, such as `ja` |
- | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
- | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
--- 
-2.54.0 (Apple Git-157)
-

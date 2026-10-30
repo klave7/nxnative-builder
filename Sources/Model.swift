@@ -79,6 +79,7 @@ struct PatchItem: Identifiable {
     var state: PatchState
     var canUndo = false
     var note = ""   // e.g. its docs were left out
+    var requires: [String] = []   // titles of the patches this one needs (a "Requires:" line in the patch's header)
 }
 
 struct Job: Identifiable, Codable {
@@ -221,6 +222,13 @@ final class AppModel: ObservableObject {
             if let dot = r.range(of: ". ") { r = String(r[..<dot.lowerBound]) }
             if r.count > 170 { r = String(r.prefix(170)) + "…" }
             return r.trimmingCharacters(in: CharacterSet(charactersIn: " .;:"))
+        }
+        // a 32-bit ARM version of a game: name the version and the ones the profile registers
+        if let re = try? NSRegularExpression(pattern: #"(.+?) is a 32-bit ARM program.*?registers (.+?): pack"#),
+           let l = tail.first(where: { $0.contains("32-bit ARM program") }),
+           let m = re.firstMatch(in: l, range: NSRange(l.startIndex..., in: l)),
+           let a = Range(m.range(at: 1), in: l), let b = Range(m.range(at: 2), in: l) {
+            return "\(l[a].replacingOccurrences(of: "[RED] ", with: "")) is a 32-bit ARM version, which cannot run here; put an update the profile registers (\(l[b])) in the game's folder."
         }
         let isErr = { (l: String) in l.range(of: #"^[A-Za-z_.]+(Error|Exception|Exit|Interrupt): "#, options: .regularExpression) != nil }
         let why = tail.last(where: isErr) ?? tail.last { $0.hasPrefix("FAIL:") } ?? tail.last { $0.hasPrefix("[RED]") && !$0.contains("exit code") && !$0.contains("provisional game profile") }
@@ -507,26 +515,45 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// The patch's "Requires: 0001-name, 0002-name" header line: the patches it cannot go on without.
+    nonisolated static func requirements(_ path: String) -> [String] {
+        guard let h = try? String(contentsOfFile: path, encoding: .isoLatin1) else { return [] }
+        for line in h.split(separator: "\n", omittingEmptySubsequences: false).prefix(30) where line.hasPrefix("Requires:") {
+            return line.dropFirst(9).split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        return []
+    }
+
+    /// The patches are independent: each goes on or comes off by itself, in any order, except that one with a "Requires:" line waits for those.
     nonisolated static func checkPatches() -> [PatchItem] {
         let have = FileManager.default.fileExists(atPath: repoDir + "/.git")
         let files = patchFiles()
-        // The patches are a stack. The highest one that can be taken off is on, and so is every one below it (a lower patch cannot be taken off on its own while a higher one changes the same lines).
-        let top = have ? files.lastIndex { variant($0.1, reverse: true) != nil } ?? -1 : -1
+        let stem = { (n: String) in n.hasSuffix(".patch") ? String(n.dropLast(6)) : n }
         var out: [PatchItem] = []
-        var allBeforeApplied = true
-        for (i, (name, path)) in files.enumerated() {
-            var st: PatchState
-            if !have { st = .norepo }
-            else if i <= top { st = .applied }
-            else if !allBeforeApplied { st = .locked }
-            else if variant(path) != nil || capture(["git", "apply", "--check", "--3way", path], cwd: repoDir).0 == 0 { st = .ready }
-            else { st = .conflict }
-            allBeforeApplied = allBeforeApplied && st == .applied
-            var item = PatchItem(name: name, title: patchTitle(path), path: path, state: st)
-            if st == .applied, i == top, let v = variant(path, reverse: true), applyVariants[v].args.contains(where: { $0.hasPrefix("--exclude") }) { item.note = "its documentation and test changes were left out (they no longer fit)" }
+        var reverseVariant: [String: Int] = [:]
+        for (name, path) in files where have { if let v = variant(path, reverse: true) { reverseVariant[name] = v } }
+        for (name, path) in files {
+            var item = PatchItem(name: name, title: patchTitle(path), path: path, state: .norepo)
+            item.requires = requirements(path)
+            if have {
+                if let v = reverseVariant[name] {
+                    item.state = .applied
+                    if applyVariants[v].args.contains(where: { $0.hasPrefix("--exclude") }) { item.note = "its documentation and test changes were left out (they no longer fit)" }
+                } else if item.requires.contains(where: { r in !files.contains { stem($0.0) == r && reverseVariant[$0.0] != nil } }) {
+                    item.state = .locked
+                } else if variant(path) != nil || capture(["git", "apply", "--check", "--3way", path], cwd: repoDir).0 == 0 {
+                    item.state = .ready
+                } else { item.state = .conflict }
+            }
             out.append(item)
         }
-        for i in out.indices where out[i].state == .applied { out[i].canUndo = !out[(i + 1)...].contains { $0.state == .applied } }
+        // a patch that an applied one needs is on too, though its own lines no longer check as they were (the other patch changes them); it comes off only after that one
+        for p in out where p.state == .applied { for r in p.requires { if let k = out.firstIndex(where: { stem($0.name) == r }) { out[k].state = .applied; out[k].note = "" } } }
+        // a patch comes off only while no applied patch needs it
+        for i in out.indices where out[i].state == .applied {
+            let me = stem(out[i].name)
+            out[i].canUndo = !out.contains { $0.state == .applied && $0.requires.contains(me) }
+        }
         return out
     }
 
