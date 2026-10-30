@@ -240,6 +240,7 @@ struct QueueSection: View {
         Card(title: "Build queue", subtitle: "") {
             pathRow("prod.keys", $m.keys, "path of prod.keys") { if let p = m.pick(folder: false, title: "Select prod.keys", start: (m.keys as NSString).deletingLastPathComponent) { m.keys = p } }
             pathRow("IPA output", $m.out, "folder for the finished .ipa files") { if let p = m.pick(folder: true, title: "Folder for the finished IPA files", start: m.out) { m.out = p } }
+            Toggle("For games over 4 GB, keep the game files out of the IPA (FlareStore refuses IPAs that big; copy romfs.img to the phone once)", isOn: $m.bigSeparate)
             Toggle("After each game, delete the build folders it created (<title ID>_build etc. in the NSP folder; they take many GB)", isOn: $m.cleanup)
             Divider()
             pathRow("Games folder", $m.gamesFolder, "a folder with one subfolder per game") {

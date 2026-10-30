@@ -96,6 +96,7 @@ struct Config: Codable {
     var games: String? = nil   // the games folder last scanned
     var localCache: Bool? = nil
     var cacheDir: String? = nil
+    var bigSeparate: Bool? = nil
 }
 
 struct Updates {
@@ -144,6 +145,7 @@ final class AppModel: ObservableObject {
     @Published var gamesFolder = "" { didSet { save() } }
     /// Copy a game that is on a network drive to a local folder, build there, move the IPA out and delete the copy.
     @Published var localCache = false { didSet { save() } }
+    @Published var bigSeparate = false { didSet { save() } }   // games over 4 GB: the game files stay out of the IPA
     @Published var cacheDir = "" { didSet { save() } }
     var workRoot: String { cacheDir.isEmpty ? NSTemporaryDirectory() + "NxNative Builder Work" : cacheDir }
     @Published var found: [FoundGame] = []
@@ -165,7 +167,7 @@ final class AppModel: ObservableObject {
     init() {
         try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
         if let d = FileManager.default.contents(atPath: configPath), let c = try? JSONDecoder().decode(Config.self, from: d) {
-            keys = c.keys; out = c.out; cleanup = c.cleanup; jobs = c.queue; gamesFolder = c.games ?? ""; localCache = c.localCache ?? false; cacheDir = c.cacheDir ?? ""
+            keys = c.keys; out = c.out; cleanup = c.cleanup; jobs = c.queue; gamesFolder = c.games ?? ""; localCache = c.localCache ?? false; bigSeparate = c.bigSeparate ?? false; cacheDir = c.cacheDir ?? ""
             nextId = (jobs.map { $0.id }.max() ?? -1) + 1
         }
         loaded = true
@@ -178,7 +180,7 @@ final class AppModel: ObservableObject {
 
     func save() {
         guard loaded else { return }
-        let c = Config(keys: keys, out: out, cleanup: cleanup, queue: jobs.filter { $0.status != "done" }.map { var j = $0; j.status = "waiting"; return j }, games: gamesFolder, localCache: localCache, cacheDir: cacheDir)
+        let c = Config(keys: keys, out: out, cleanup: cleanup, queue: jobs.filter { $0.status != "done" }.map { var j = $0; j.status = "waiting"; return j }, games: gamesFolder, localCache: localCache, cacheDir: cacheDir, bigSeparate: bigSeparate)
         if let d = try? JSONEncoder().encode(c) { try? d.write(to: URL(fileURLWithPath: configPath)) }
     }
 
@@ -762,12 +764,15 @@ final class AppModel: ObservableObject {
         let fm = FileManager.default
         guard !out.isEmpty else { return ("failed", "Failed: no output folder is set.") }
         let cached = localCache && !AppModel.onLocalVolume(job.folder)
+        let exts: Set<String> = ["nsp", "nsz", "xci", "xcz"]
+        let names = ((try? fm.contentsOfDirectory(atPath: job.folder)) ?? []).filter { exts.contains(($0 as NSString).pathExtension.lowercased()) }
+        let total = names.reduce(0) { $0 + (((try? fm.attributesOfItem(atPath: job.folder + "/" + $1))?[.size] as? Int) ?? 0) }
+        // FlareStore refuses an IPA with an entry over 4 GiB ("out of range integral type conversion attempted"), and the game files are one entry: above that size they stay out of the IPA (--romfs separate)
+        // and go on the phone once as Documents/romfs.img, which no installer limits.
+        let separate = bigSeparate && total > 4 << 30
         var folder = job.folder, target = ipa, work = ""
         if cached {
             work = workRoot + "/job-\(job.id)"
-            let exts: Set<String> = ["nsp", "nsz", "xci", "xcz"]
-            let names = ((try? fm.contentsOfDirectory(atPath: job.folder)) ?? []).filter { exts.contains(($0 as NSString).pathExtension.lowercased()) }
-            let total = names.reduce(0) { $0 + (((try? fm.attributesOfItem(atPath: job.folder + "/" + $1))?[.size] as? Int) ?? 0) }
             try? fm.createDirectory(atPath: workRoot, withIntermediateDirectories: true)
             let free = (try? URL(fileURLWithPath: workRoot).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage).flatMap { $0 } ?? Int64.max
             if names.isEmpty { return ("failed", "Failed: no NSP, NSZ or XCI files in the folder.") }
@@ -791,11 +796,24 @@ final class AppModel: ObservableObject {
             try? fm.createDirectory(atPath: stage, withIntermediateDirectories: true)
             target = stage + "/" + safe + ".ipa"
         }
-        let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", folder, "-k", keys, "--app-name", job.name, "-o", target, "--progress", "lines"] + (cleanup || cached ? ["--no-keep-extracted"] : [])
+        let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", folder, "-k", keys, "--app-name", job.name, "-o", target, "--progress", "lines"] + (separate ? ["--romfs", "separate"] : cleanup || cached ? ["--no-keep-extracted"] : [])
         let rc = await stream(cmd, cwd: repoDir)
         var status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
         var why = status == "failed" ? failureReason(streamText) : status == "done" ? successNote(streamText).map { "Success: " + $0 + "." } : nil
         var keep = false
+        var gameFiles = ""   // where a separate build's romfs.img was put
+        if status == "done", separate {
+            // the image is the extraction's RomFS.img, named in the line the build prints for push_romfs.sh; it moves beside the IPA, in a folder of its own, under the name the phone wants
+            if let re = try? NSRegularExpression(pattern: #"push_romfs\.sh <device UDID> \S+ "([^"\n]+)""#), let m = re.firstMatch(in: streamText, range: NSRange(streamText.startIndex..., in: streamText)),
+               let r = Range(m.range(at: 1), in: streamText) {
+                let image = String(streamText[r])
+                let dir = out + "/" + safe + " (game files)"
+                try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                say("Moving the game files image to \(dir) …\n")
+                if await stream(["/bin/mv", "-f", image, dir + "/romfs.img"]) == 0 { gameFiles = dir + "/romfs.img" }
+            }
+            if gameFiles.isEmpty { status = "failed"; keep = true; why = "Failed: the IPA was built, but its game files image (romfs.img) could not be found or moved; it is in the build folder of the NSP folder." }
+        }
         if status == "done" {
             if cached { say("Moving the IPA to \(ipa) …\n") }
             var mv: Int32
@@ -808,7 +826,11 @@ final class AppModel: ObservableObject {
                 if mv == 0 { mv = await stream(["/bin/mv", "-f", part, ipa]) } else { _ = await stream(["/bin/rm", "-f", part]) }
             }
             if mv != 0 { status = "failed"; keep = true; why = "Failed: the IPA was built but could not be put in the output folder; it is kept in \(target)." }
-            else { try? fm.removeItem(atPath: ipa + ".idx") }   // an index left in the output by an older version
+            else {
+                try? fm.removeItem(atPath: ipa + ".idx")   // an index left in the output by an older version
+                if !gameFiles.isEmpty { why = "Success: the game files are not in the IPA (over 4 GB); after installing it, copy " + gameFiles + " to the app's Documents folder on the iPhone (Files app, or Finder's Files tab)." }
+                else if ((try? fm.attributesOfItem(atPath: ipa))?[.size] as? Int ?? 0) > 4 << 30 { why = (why.map { $0 + " " } ?? "Success: ") + "The IPA is over 4 GB, which some installers (FlareStore) refuse; the option under Build queue keeps the game files out of it." }
+            }
         }
         if cached { if !keep { say("Deleting the local work folder \(work) …\n"); _ = await stream(["/bin/rm", "-rf", work]) } }
         else if cleanup { if !keep { _ = await stream(["/bin/rm", "-rf", stage]) }; clean(folder: job.folder, ipa: ipa, since: started, built: status == "done") }
