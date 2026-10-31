@@ -1,11 +1,11 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: klave7 <5594473+klave7@users.noreply.github.com>
-Date: Fri, 30 Oct 2026 12:00:00 -0600
+Date: Sat, 31 Oct 2026 12:00:00 -0600
 Subject: [PATCH] In-game control editor
 
 ---
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index bb29206f..c201dbd7 100644
+index 00e1ddd1..96e00e2a 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
 @@ -25,2 +25,3 @@ DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
@@ -349,15 +349,15 @@ index cd43d2d7..0e333707 100644
 +        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PAD_EDIT'})
          self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 82ed6ed9..34d60e8c 100644
+index 87909a20..f62c1a12 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -188,2 +188,3 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
+@@ -193,2 +193,3 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
  DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 +DM_PAD_EDIT	player	`1` opens the on-screen control editor once when the game starts (iOS); launcher setting, **Edit controls at start**
  DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
 diff --git a/docs/settings.md b/docs/settings.md
-index 833bd442..19fb81a0 100644
+index 0f992d4c..32ab878f 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
 @@ -6,3 +6,3 @@ The screen before the game starts shows the settings the game supports. A settin
