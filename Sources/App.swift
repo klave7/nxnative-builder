@@ -96,7 +96,7 @@ struct SetupSection: View {
                     VStack(alignment: .leading, spacing: 1) { Text(i.label).bold(); Text(i.why).font(.caption).foregroundColor(.secondary) }
                     Spacer()
                     if !i.ok {
-                        Button(i.id == "xcode" ? "Open App Store…" : i.id == "brew" ? "Install in Terminal…" : "Install…") { Task { await m.install(i) } }
+                        Button(i.id == "xcode" ? "Open App Store…" : i.id == "xcodeshader" ? "Open Apple downloads…" : i.id == "brew" ? "Install in Terminal…" : "Install…") { Task { await m.install(i) } }
                             .disabled(i.blocked || !m.busy.isEmpty)
                     }
                 }

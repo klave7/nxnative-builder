@@ -23,6 +23,10 @@ let configPath = dataDir + "/config.json"
 
 func brewPath() -> String? { ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].first { FileManager.default.isExecutableFile(atPath: $0) } }
 
+/// The Xcode the shader build must use: Seedds' shaders are tested with one Metal compiler (dm/gfx/tools/own_compilers.py names its Xcode), and each Xcode downloads and uses its own Metal
+/// toolchain, so a newer selected Xcode would fetch and use the wrong one. Set by `chooseXcode()` when the right Xcode is installed beside the selected one; every command the app runs gets it as DEVELOPER_DIR.
+nonisolated(unsafe) var developerDirOverride: String? = nil
+
 func toolEnv() -> [String: String] {
     var paths: [String] = []
     if let b = brewPath() { paths.append((b as NSString).deletingLastPathComponent) }
@@ -32,7 +36,43 @@ func toolEnv() -> [String: String] {
     env["PYTHONUNBUFFERED"] = "1"
     env["HOMEBREW_NO_ENV_HINTS"] = "1"
     env["PYTHONPATH"] = nil
+    if let d = developerDirOverride { env["DEVELOPER_DIR"] = d }
     return env
+}
+
+/// The Xcode version the profile's shader tests name ("27.1"), read from the cloned repo; nil when the repo or the file is not there (an older Seedds has no such check).
+func wantedXcodeVersion() -> String? {
+    if let v = ProcessInfo.processInfo.environment["NXB_XCODE_VERSION"] { return v }   // for tests
+    guard let t = try? String(contentsOfFile: repoDir + "/dm/gfx/tools/own_compilers.py", encoding: .utf8),
+          let r = t.range(of: #"(?m)^XCODE_VERSION = '([^']+)'"#, options: .regularExpression) else { return nil }
+    return String(t[r]).components(separatedBy: "'")[1]
+}
+
+/// Every Xcode on this Mac (the ones in /Applications and the selected one): its Developer folder and version ("27.1").
+func installedXcodes() -> [(dev: String, version: String)] {
+    let fm = FileManager.default
+    var devs = ((try? fm.contentsOfDirectory(atPath: "/Applications")) ?? []).sorted().filter { $0.hasPrefix("Xcode") && $0.hasSuffix(".app") }.map { "/Applications/\($0)/Contents/Developer" }
+    let sel = capture(["-u", "DEVELOPER_DIR", "xcode-select", "-p"])
+    if sel.0 == 0, !sel.1.isEmpty, !devs.contains(sel.1) { devs.append(sel.1) }
+    var out: [(String, String)] = []
+    for d in devs {
+        let r = capture(["DEVELOPER_DIR=" + d, "xcodebuild", "-version"])
+        guard r.0 == 0, let line = r.1.components(separatedBy: "\n").first, line.hasPrefix("Xcode ") else { continue }
+        out.append((d, String(line.dropFirst(6))))
+    }
+    return out
+}
+
+/// Picks the Xcode whose version the shader tests name and makes it the one every command uses (without changing the user's selected Xcode, which needs sudo); returns it, or nil when it is not installed.
+@discardableResult
+func chooseXcode() -> (dev: String, version: String)? {
+    developerDirOverride = nil
+    guard let want = wantedXcodeVersion() else { return nil }
+    let all = installedXcodes()
+    guard let hit = all.first(where: { $0.version == want }) ?? all.first(where: { $0.version.hasPrefix(want + ".") }) else { return nil }
+    let sel = capture(["-u", "DEVELOPER_DIR", "xcode-select", "-p"]).1
+    developerDirOverride = hit.dev == sel ? nil : hit.dev
+    return hit
 }
 
 func which(_ tool: String) -> String? {
@@ -232,6 +272,9 @@ final class AppModel: ObservableObject {
            let a = Range(m.range(at: 1), in: l), let b = Range(m.range(at: 2), in: l) {
             return "\(l[a].replacingOccurrences(of: "[RED] ", with: "")) is a 32-bit ARM version, which cannot run here; put an update the profile registers (\(l[b])) in the game's folder."
         }
+        if tail.contains(where: { $0.contains("Metal compiler is not the one the shaders were tested with") }) {
+            return "Failed: this Mac's Metal compiler is not the one the shaders were tested with; install the Xcode named in Setup (Xcode \(wantedXcodeVersion() ?? "27.1")) beside this one."
+        }
         let isErr = { (l: String) in l.range(of: #"^[A-Za-z_.]+(Error|Exception|Exit|Interrupt): "#, options: .regularExpression) != nil }
         let why = tail.last(where: isErr) ?? tail.last { $0.hasPrefix("FAIL:") } ?? tail.last { $0.hasPrefix("[RED]") && !$0.contains("exit code") && !$0.contains("provisional game profile") }
             ?? lines.last { $0.hasPrefix("[RED]") && !$0.contains("exit code") && !$0.contains("provisional game profile") }
@@ -315,8 +358,21 @@ final class AppModel: ObservableObject {
                                how: "Opens the Mac App Store page. Install Xcode, open it once and accept its licence, then press Recheck.", command: "open the Xcode page in the Mac App Store", ok: xcodeOK, manual: true))
         let sdk = xcodeOK && capture(["xcodebuild", "-showsdks"]).1.contains("iphoneos")
         items.append(SetupItem(id: "ios", label: "iOS platform for Xcode", why: "the iPhone SDK the app is built against (several GB)", how: "", command: "xcodebuild -downloadPlatform iOS", ok: sdk, deps: ["xcode"]))
-        let metal = xcodeOK && capture(["xcrun", "-sdk", "iphoneos", "metal", "--version"]).0 == 0
-        items.append(SetupItem(id: "metal", label: "Metal compiler", why: "compiles the game's shaders (Xcode installs it separately)", how: "", command: "xcodebuild -downloadComponent MetalToolchain", ok: metal, deps: ["xcode"]))
+        let want = wantedXcodeVersion(), chosen = chooseXcode()
+        let dev = developerDirOverride.map { "DEVELOPER_DIR='\($0)' " } ?? ""
+        if let want = want {
+            items.append(SetupItem(id: "xcodeshader", label: "Xcode \(want) for the shaders",
+                                   why: "Seedds' shaders are tested with Xcode \(want)'s Metal compiler only; another Xcode's compiler stops the build (GitHub issue #242). It can sit beside your Xcode: the app uses it without changing your selected Xcode",
+                                   how: "Opens Apple's download page (sign in with your Apple ID). Download Xcode \(want), unzip it, rename it /Applications/Xcode-\(want).app, open it once and accept its licence, then press Recheck.",
+                                   command: "open https://developer.apple.com/download/all/", ok: chosen != nil, manual: true, deps: ["xcode"]))
+        }
+        // the compiler check Seedds' build runs (own_compilers.py), with the chosen Xcode: right compiler present; without that script (an older clone) any compiler will do
+        let check = repoDir + "/dm/gfx/tools/own_compilers.py"
+        let py = FileManager.default.fileExists(atPath: venvDir + "/bin/python") ? venvDir + "/bin/python" : "python3"
+        let metal = xcodeOK && (want != nil && FileManager.default.fileExists(atPath: check) ? capture([py, "-I", check, "--check-metal"], cwd: repoDir).0 == 0
+                                                                                              : capture(["xcrun", "-sdk", "iphoneos", "metal", "--version"]).0 == 0)
+        items.append(SetupItem(id: "metal", label: "Metal compiler", why: "compiles the game's shaders" + (want.map { " with the Metal toolchain of Xcode \($0), the version they were tested with" } ?? "") + " (Xcode installs it separately)", how: "",
+                               command: dev + "xcodebuild -downloadComponent MetalToolchain", ok: metal, deps: want == nil ? ["xcode"] : ["xcode", "xcodeshader"]))
         let brew = brewPath()
         items.append(SetupItem(id: "brew", label: "Homebrew", why: "installs the command line tools below; its installer opens in Terminal and asks for your Mac password there", how: "",
                                command: "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"   (runs in Terminal)", ok: brew != nil, manual: true))
@@ -332,12 +388,14 @@ final class AppModel: ObservableObject {
     }
 
     func install(_ item: SetupItem) async {
-        let verb = item.manual ? (item.id == "xcode" ? "Open" : "Open Terminal") : "Install"
+        let verb = item.manual ? (item.id == "xcode" || item.id == "xcodeshader" ? "Open" : "Open Terminal") : "Install"
         let msg = item.manual && !item.how.isEmpty ? item.how : "This will: \(item.why)."
         guard await ask("\(item.id == "xcode" ? "Get" : "Install") \(item.label)?", msg, command: item.command, ok: verb) else { return }
         switch item.id {
         case "xcode":
             NSWorkspace.shared.open(URL(string: "macappstore://apps.apple.com/app/xcode/id497799835")!)
+        case "xcodeshader":
+            NSWorkspace.shared.open(URL(string: "https://developer.apple.com/download/all/")!)
         case "brew":
             let script = NSTemporaryDirectory() + "install-homebrew.command"   // a throwaway launcher, not an app file
             let body = "#!/bin/bash\n/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\necho\necho \"Done. Close this window and press Recheck in NxNative Builder.\"\n"
@@ -353,7 +411,9 @@ final class AppModel: ObservableObject {
     private func runInstall(_ id: String) async {
         switch id {
         case "ios": _ = await stream(["xcodebuild", "-downloadPlatform", "iOS"])
-        case "metal": _ = await stream(["xcodebuild", "-downloadComponent", "MetalToolchain"])
+        case "metal":
+            say("Downloading the Metal toolchain of " + (developerDirOverride.map { "the Xcode at \($0)" } ?? "the selected Xcode") + " (the one the shaders were tested with, not the newest) …\n")
+            _ = await stream(["xcodebuild", "-downloadComponent", "MetalToolchain"])
         case "venv":
             let py = ((brewPath() ?? "") as NSString).deletingLastPathComponent + "/python3.12"
             if await stream([py, "-m", "venv", venvDir]) == 0 {
