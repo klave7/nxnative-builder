@@ -27,7 +27,7 @@ index 9672a04d..cb26a476 100644
 +DM_PORTRAIT_LAYOUT	toggle	-	1	platform:ios	Controls	iPhone Duo portrait: game above the controls	Only for the iPhone Duo's inner screen held upright: the game on top, the controls below. Other phones and iPads stay landscape, whatever this says.	device=foldable
  DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 28445aea..d3bbf7af 100644
+index 59c995df..e418eec7 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -464,3 +464,3 @@ void mtl_init(void) {
@@ -35,7 +35,7 @@ index 28445aea..d3bbf7af 100644
 -        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];   // 8 floats for the picture's crop, 8 for the bars' image (present_encode_m4)
 +        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 24 options:MTLResourceStorageModeShared];   // 8 floats for the picture's crop, 8 for the bars' image, 8 for the controls' image (present_encode_m4)
          if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
-@@ -11180,3 +11180,18 @@ static void present_pipeline(MTLPixelFormat format) {
+@@ -11463,3 +11463,18 @@ static void present_pipeline(MTLPixelFormat format) {
  // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
 +// The portrait layout (front_ios.m: a screen taller than wide, the iPhone Duo's inner screen held upright): the canvas is split at g_split_y of its height from the top. The picture is centred in the top part
 +// (below g_split_top of the height, the camera's area), with the bars' fill around it; the lower part shows the controls' image (mtl_set_controls_image) behind the on-screen controls. Fractions of the
@@ -54,7 +54,7 @@ index 28445aea..d3bbf7af 100644
 +        return (MTLViewport){floor((dw - cw * s) / 2), st + floor((rh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
 +    }
      double s = fmin(dw / cw, dh / ch);
-@@ -11309,11 +11324,11 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
+@@ -11592,11 +11607,11 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
  }
 -static CGImageRef g_bar_cg;                    // the image the front end handed over (retained)
 -static __strong id<MTLTexture> g_bar_img;      // its texture, made on the present thread at the first present that needs it (the device may not exist when the front end calls)
@@ -74,7 +74,7 @@ index 28445aea..d3bbf7af 100644
 +    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
 +    if (!w || !h || w > 8192 || h > 8192) { MLOG("[RED] present: the %s image is %zux%zu, not used", what, w, h); CGImageRelease(cg); return nil; }
      uint8_t *px = calloc(w * h, 4); CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-@@ -11324,7 +11339,14 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
+@@ -11607,7 +11622,14 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
      id<MTLTexture> t = cx ? [g_dev newTextureWithDescriptor:d] : nil;
 -    if (t) { [t replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:px bytesPerRow:w * 4]; t.label = @"present bars image"; res_add(t); res_commit(); g_bar_img = t; atomic_store(&g_bar_img_aspect, (double)w / h);
 -        MLOG("present bars: the still image is %zux%zu", w, h); }
@@ -93,7 +93,7 @@ index 28445aea..d3bbf7af 100644
 +    double w2 = ca > ia ? 1 : ca / ia, h2 = ca > ia ? ia / ca : 1;
 +    k[0] = (float)((1 - w2) / 2); k[1] = (float)((1 - h2) / 2); k[2] = (float)w2; k[3] = (float)h2; k[4] = 0; k[5] = 0; k[6] = 1; k[7] = 1;
  }
-@@ -11367,5 +11389,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11650,5 +11672,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      present_pipeline(dst.pixelFormat);
 -    double dw = dst.width, dh = dst.height;
 +    double dw = dst.width, dh = dst.height, st = 0, sy = 0;
@@ -102,7 +102,7 @@ index 28445aea..d3bbf7af 100644
 -    int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
 +    int full = !split && vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
      if (r[2] && r[3]) atomic_store_explicit(&g_present_aspect, (double)r[2] / (double)r[3], memory_order_relaxed);
-@@ -11373,4 +11396,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11656,4 +11679,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
 -    int mode = !full && fx == &g_fx_present ? bar_mode() : 0;   // not in a screenshot's present
 -    id<MTLTexture> bg = nil, img = mode == 2 ? bar_image() : nil;
@@ -111,7 +111,7 @@ index 28445aea..d3bbf7af 100644
 +    double bw = dw, bh = split ? sy : dh;   // the bars' region: the whole canvas, or the top part
 +    id<MTLTexture> bg = nil, img = mode == 2 ? bar_image() : nil, cimg = split && live ? ctl_image() : nil;
      float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
-@@ -11379,10 +11404,8 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11662,10 +11687,8 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
 -    if (mode == 1) bg = bar_blur_m4(cb, tex, uvb, dst.pixelFormat, dw, dh);
 -    if (img) {   // the image covers the canvas, cropped from its middle (constants in the buffer's second half)
@@ -126,7 +126,7 @@ index 28445aea..d3bbf7af 100644
 -    rp.colorAttachments[0].loadAction = full || bg || img ? MTLLoadActionDontCare : MTLLoadActionClear;   // the bars' fill draws every pixel
 +    rp.colorAttachments[0].loadAction = full || (!split && (bg || img)) ? MTLLoadActionDontCare : MTLLoadActionClear;   // the bars' fill draws every pixel (with a split, the camera's area stays as cleared)
      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-@@ -11396,9 +11419,14 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11679,9 +11702,14 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      [g_present_args setAddress:uvb.gpuAddress atIndex:0];
 -    if (bg || img) {   // the dimmed, blurred picture or the still image over the whole canvas, the sharp picture on top of it
 +    if (bg || img) {   // the dimmed, blurred picture or the still image over the bars' region, the sharp picture on top of it
@@ -144,7 +144,7 @@ index 28445aea..d3bbf7af 100644
      }
 +    if (bg || img || cimg) { [g_present_args setTexture:tex.gpuResourceID atIndex:0]; [g_present_args setAddress:uvb.gpuAddress atIndex:0]; }
      [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
-@@ -11412,3 +11440,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
+@@ -11695,3 +11723,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
      id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
 -    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];
 +    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 24 options:MTLResourceStorageModeShared];
@@ -269,10 +269,10 @@ index 5ae75b2a..e72cb918 100644
 +    }
      CGFloat u = self.u;
 diff --git a/dm/ios/Sources/Launcher.swift b/dm/ios/Sources/Launcher.swift
-index f2cb6c1f..4f5f45d0 100644
+index 924e2e04..a50b3dae 100644
 --- a/dm/ios/Sources/Launcher.swift
 +++ b/dm/ios/Sources/Launcher.swift
-@@ -93,2 +93,7 @@ private struct DocumentPicker: UIViewControllerRepresentable {
+@@ -94,2 +94,7 @@ private struct DocumentPicker: UIViewControllerRepresentable {
  
 +// The settings screen stays landscape: the app's Info.plist now lists portrait too (for the portrait layout on the iPhone Duo's inner screen, front_ios.m), which a hosting controller would take
 +private final class LauncherHost<Content: View>: UIHostingController<Content> {
@@ -280,7 +280,7 @@ index f2cb6c1f..4f5f45d0 100644
 +}
 +
  private struct LauncherView: View {
-@@ -181,3 +186,3 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
+@@ -182,3 +187,3 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
      }
 -    let h = UIHostingController(rootView: view)
 +    let h = LauncherHost(rootView: view)
@@ -4660,7 +4660,7 @@ literal 0
 HcmV?d00001
 
 diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
-index e75e3ee7..0c761a67 100644
+index 77a2e35b..863003c0 100644
 --- a/dm/ios/Sources/front_ios.m
 +++ b/dm/ios/Sources/front_ios.m
 @@ -18,2 +18,5 @@
@@ -4673,17 +4673,19 @@ index e75e3ee7..0c761a67 100644
  @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
 +@property (nonatomic) BOOL allowedPortrait;   // the orientations last asked for included portrait (see supportedInterfaceOrientations)
  @property (nonatomic) BOOL fill;   // DM_BAR_FILL=blur or image: the game view is the whole screen, and the present fits the picture in it and fills the bars (nvn_mtl.m)
-@@ -103,2 +107,5 @@ - (void)startGame {
+@@ -107,3 +111,6 @@ - (void)startGame {
            if (img.CGImage) mtl_set_bar_image(img.CGImage); else LOG("[RED] front end: bar_background.jpg is not in the app, the bars stay black"); } }
+-    self.game =[[DmGameView alloc] initWithFrame:self.view.bounds];
 +    { const char *pe = getenv("DM_PORTRAIT_LAYOUT"); if (!pe || atoi(pe)) {   // the image behind the controls in the portrait layout
 +          NSString *path = [NSBundle.mainBundle pathForResource:@"controls_background" ofType:@"jpg"]; UIImage *img = path ? [UIImage imageWithContentsOfFile:path] : nil;
 +          if (img.CGImage) mtl_set_controls_image(img.CGImage); else LOG("[RED] front end: controls_background.jpg is not in the app, the area behind the controls stays black"); } }
-     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
-@@ -116,2 +123,3 @@ - (void)startGame {
++    self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
+     [self.view addSubview:self.game];
+@@ -120,2 +127,3 @@ - (void)startGame {
      tv_attach();   // a TV connected while the launcher showed
 +    [self setNeedsUpdateOfSupportedInterfaceOrientations];   // the game is running: portrait may be allowed now (wantsPortrait)
      front_ios_boot();
-@@ -121,5 +129,14 @@ - (void)viewDidLayoutSubviews {
+@@ -125,5 +133,14 @@ - (void)viewDidLayoutSubviews {
      CGRect b = self.view.bounds; if (!self.game) return;
 -    if (self.game.superview == self.view) self.game.frame = self.fill ? b : fit_16_9(b);   // on a TV the TV's view lays it out; filling the bars, the phone's picture view is the whole screen and the present letterboxes the picture inside it
 +    if ([self wantsPortrait] != self.allowedPortrait) {   // folded or unfolded: ask again
@@ -4700,7 +4702,7 @@ index e75e3ee7..0c761a67 100644
 -        CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
 +        UIEdgeInsets ins = self.view.safeAreaInsets; ins.left = ins.right = MIN(ins.left, ins.right); CGRect s = UIEdgeInsetsInsetRect(b, ins); CGFloat u = MIN(b.size.height / 430.0, 1.3);
          self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
-@@ -141,3 +158,12 @@ - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll
+@@ -145,3 +162,12 @@ - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll
  - (BOOL)prefersStatusBarHidden { return YES; }
 -- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 +// Landscape only, as the app has always been, except on the iPhone Duo's inner screen once the game is running (and DM_PORTRAIT_LAYOUT is not 0): there portrait is allowed too, so held upright the app gets a
@@ -4725,32 +4727,19 @@ index 5be3a4c2..3defef5b 100644
 +        UIRequiresFullScreen~ipad: true   # iPad only (as before). Without a value for the iPhone family the app is resizable there: the iPhone Duo shows a fixed-size app as a landscape window scaled into its portrait screen, so the portrait layout never got a portrait window
          UIStatusBarHidden: true
 diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
-index 9c849a50..e6e25779 100644
+index 3a14e38f..bc764cfb 100644
 --- a/dm/tools/tests/test_launcher_settings.py
 +++ b/dm/tools/tests/test_launcher_settings.py
 @@ -64,3 +64,3 @@ class LauncherSettingsTests(unittest.TestCase):
          self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
--        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_BAR_FILL', 'DM_PAD_EDIT'})
+-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_BAR_FILL'})
 +        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PAD_EDIT', 'DM_PHONE_ROTATE', 'DM_BAR_FILL', 'DM_PORTRAIT_LAYOUT'})
          self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-@@ -99,3 +99,4 @@ class LauncherSettingsTests(unittest.TestCase):
-         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
--        self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
-+        self.assertFalse({'level', 'needs', 'device'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
-+        self.assertEqual(rows['DM_PORTRAIT_LAYOUT']['device'], 'foldable', 'the iPhone Duo portrait layout is drawn only on a Duo')
- 
-@@ -104,4 +105,5 @@ class LauncherSettingsTests(unittest.TestCase):
-         self.assertEqual(settings.meta('', 1), {})
-+        self.assertEqual(settings.meta('device=foldable', 1), {'device': 'foldable'})
-         for bad, why in [('colour=red', 'unknown meta key'), ('level', 'unknown meta key'), ('level=basic;level=basic', 'twice'),
--                         ('level=advanced', 'does not match'), ('needs=DM_RUMBLE', 'does not match'), ('needs=rumble=1', 'does not match')]:
-+                         ('level=advanced', 'does not match'), ('needs=DM_RUMBLE', 'does not match'), ('needs=rumble=1', 'does not match'), ('device=tablet', 'does not match')]:
-             with self.subTest(bad=bad), self.assertRaises(SystemExit) as e:
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index a690aa41..3efea2ff 100644
+index 9dc55b64..3b1f5df6 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -198,2 +198,4 @@ DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the mo
+@@ -203,2 +203,4 @@ DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the mo
  DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
 +DM_PHONE_ROTATE	player	On iOS, `auto` (default; on iOS 27 and later none, since Core Motion delivers the samples in the picture's frame; on iOS 26 one quarter turn more on a known foldable's inner screen (recognized by its shape), in every orientation) or `<0..3>` (launcher setting **Gyro rotation**) turns the phone's gyro that many more quarter turns about the screen's normal, for a screen that sits turned against the phone's body (a foldable's inner screen)
 +DM_PORTRAIT_LAYOUT	player	On iOS, `0` turns off the portrait layout (default on; launcher setting **iPhone Duo portrait: game above the controls**): only on the iPhone Duo's inner screen held upright (every other iPhone and iPad stays landscape and is not affected), the picture is shown at the top of the screen and the on-screen controls are laid out below it (`DmGamepad.m`, `mtl_set_present_top`), instead of the picture centred with the controls over the whole screen
@@ -4772,7 +4761,7 @@ index 4bb97df3..6c8f091d 100644
 +        "device": {"description": "foldable: a setting only an iPhone Duo can use. A front end that can tell the device draws it only there; one that cannot may leave it out or draw it, where it does nothing.", "const": "foldable"},
          "needs": {"description": "<VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value. A row naming a variable this list does not have stays drawn.", "type": "string", "pattern": "^DM_[A-Z0-9_]+=[^;=]+$"}
 diff --git a/docs/playing.md b/docs/playing.md
-index bdf43783..112016d1 100644
+index 0287b56c..a6601a96 100644
 --- a/docs/playing.md
 +++ b/docs/playing.md
 @@ -24,3 +24,3 @@ A controller that supplies gyro data through Apple's controller support (DualSen
@@ -4780,43 +4769,3 @@ index bdf43783..112016d1 100644
 -`DM_PHONE_MOTION=0` in `Documents/env.txt` stops the phone's gyro, `DM_MOTION=0` all motion. If motion misbehaves, pack with `--no-motion` (`MOTION = False` in Spyder) for an app without it; `DM_MOTION=1` in `Documents/env.txt` turns it back on.
 +`DM_PHONE_MOTION=0` in `Documents/env.txt` stops the phone's gyro (the **Gyro rotation** setting turns it for a screen that sits turned against the phone's body: automatic on the iPhone Duo, or `DM_PHONE_ROTATE=0` to `3` quarter turns by hand), `DM_MOTION=0` all motion. If motion misbehaves, pack with `--no-motion` (`MOTION = False` in Spyder) for an app without it; `DM_MOTION=1` in `Documents/env.txt` turns it back on.
  
-diff --git a/docs/settings.md b/docs/settings.md
-index 8a57e7b4..d1a06c59 100644
---- a/docs/settings.md
-+++ b/docs/settings.md
-@@ -6,3 +6,3 @@ The screen before the game starts shows the settings the game supports. A settin
- - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter), [Bars around the picture](#bars-around-the-picture)
--- [Controls](#controls): [Touch feedback](#touch-feedback), [Edit controls at start](#edit-controls-at-start), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
-+- [Controls](#controls): [Touch feedback](#touch-feedback), [Edit controls at start](#edit-controls-at-start), [Gyro rotation](#gyro-rotation), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [iPhone Duo portrait: game above the controls](#iphone-duo-portrait-game-above-the-controls)
- - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
-@@ -18,3 +18,3 @@ When you change a setting and tap **Play**, the app keeps your choice, also when
- 
--A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter, Touch feedback, Bars around the picture and Edit controls at start, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
-+A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter, Touch feedback, Edit controls at start, Portrait layout, Gyro rotation and Bars around the picture, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
- 
-@@ -87,2 +87,6 @@ Positions are measured from the built-in layout, so a layout you make fits other
- 
-+### Gyro rotation
-+
-+Turns the phone's motion controls (the gyro that drives pointer and aiming games when no controller supplies motion). **Automatic**, the default, is right for every screen on iOS 27 and later, where Core Motion delivers the motion in the picture's frame (the iPhone Duo's inner screen included), so it adds nothing there. On iOS 26 it adds the quarter turn the iPhone Duo's inner screen needs, in landscape and in portrait; every other phone, and the Duo's closed screen, follow the screen's orientation. If the pointer or aiming comes out turned (up and down acting as left and right), choose **0°**, **90°**, **180°** or **270°** by hand.
-+
- ### Game rumble
-@@ -99,2 +103,8 @@ A controller's vibration weaker than this stays off, and the rest is spread over
- 
-+### iPhone Duo portrait: game above the controls
-+
-+**This is only for the iPhone Duo's inner screen, and the setting is only shown on an iPhone Duo.** Every other iPhone and every iPad does not list it, stays in landscape and is not affected. (The Duo is recognized by its inner screen's shape; a Duo that has run a game on its inner screen is remembered, so the setting shows with the closed screen too.) When the iPhone Duo's inner screen is held upright, with this on (the default), the screen is split in half. The game's picture is centred in the top half, with whatever **Bars around the picture** says around it (a blurred copy of the picture, the still image, or black). The on-screen controls are all in the bottom half, over a dark background image (`dm/ios/Sources/controls_background.jpg`): the shoulder keys, − and + and the layout button along the top of that half, the left stick and D-pad at the bottom left, the face keys at the bottom right. Touches on the picture still go to the game's touch screen, so a pointer or touch game is played on the top half. Turn it off to get the picture centred with the controls over the whole screen, as before. The app allows portrait only on the iPhone Duo's inner screen once the game is running (the screen is recognized by its shape); every other screen, iPads included, and the settings screen, stay landscape.
-+
-+Control positions and sizes made in the [editor](#edit-controls-at-start) are offsets from the built-in places in each layout, so they carry over to the portrait layout, where the controls sit in a smaller area; adjust them there if they do not fit. A landscape screen is not affected.
-+
- ## Performance
-@@ -205,3 +215,3 @@ Sets every setting back to the game's tested default; **Play** then forgets your
- 
--A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter**, **Touch feedback**, **Bars around the picture** and **Edit controls at start** are only on the iPhone.
-+A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter**, **Touch feedback**, **Edit controls at start**, **iPhone Duo portrait: game above the controls**, **Gyro rotation** and **Bars around the picture** are only on the iPhone.
- 
-@@ -249,2 +259,4 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
- | Edit controls at start | `DM_PAD_EDIT` | `1`, `0` |
-+| iPhone Duo portrait: game above the controls | `DM_PORTRAIT_LAYOUT` | `1`, `0` |
-+| Gyro rotation | `DM_PHONE_ROTATE` | `auto`, or `0` to `3` (quarter turns) |
- | Game rumble | `DM_RUMBLE` | `1`, `0` |
