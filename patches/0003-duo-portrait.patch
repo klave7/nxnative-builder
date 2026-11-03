@@ -14,14 +14,14 @@ index d16b9cb9..fa824a8b 100644
 +    'device': r'foldable',                   # a setting only that kind of device can use (the iPhone Duo): a front end that can tell shows it only there
  }
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index b5f678b2..3c1aca9d 100644
+index 9672a04d..cb26a476 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
-@@ -29,2 +29,3 @@ DM_STICK_FLOAT_L	toggle	-	0	platform:ios	Controls	Floating left stick	The left s
- DM_STICK_FIXED_R	toggle	-	0	platform:ios	Controls	Fixed right stick (3D layout)	Draws the right stick at a fixed place below the face buttons, like a Pro Controller's, instead of letting a touch in the right third be its centre.
+@@ -27,2 +27,3 @@ DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
+ DM_PAD_EDIT	toggle	-	0	platform:ios	Controls	Edit controls at start	Opens the control editor once when the game starts. You can also press and hold the layout button during play.
 +DM_PHONE_ROTATE	choice	auto=Automatic,0=0°,1=90°,2=180°,3=270°	auto	platform:ios	Controls	Gyro rotation	Automatic turns the motion controls for the iPhone Duo's inner screen and leaves other phones as they are. Choose a turn by hand if the pointer or aiming comes out turned.
  DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
-@@ -32,2 +33,3 @@ DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBL
+@@ -30,2 +31,3 @@ DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBL
  DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff
 +DM_PORTRAIT_LAYOUT	toggle	-	1	platform:ios	Controls	iPhone Duo portrait: game above the controls	Only for the iPhone Duo's inner screen held upright: the game on top, the controls below. Other phones and iPads stay landscape, whatever this says.	device=foldable
  DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
@@ -149,7 +149,7 @@ index c8f7be47..340b1164 100644
 +    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 24 options:MTLResourceStorageModeShared];
      if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
 diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
-index cdf92581..f65f2065 100644
+index 08e3c422..1fec56fa 100644
 --- a/dm/ios/Sources/DmGamepad.m
 +++ b/dm/ios/Sources/DmGamepad.m
 @@ -10,3 +10,3 @@
@@ -171,24 +171,24 @@ index cdf92581..f65f2065 100644
 +        int quarter = atomic_load(&g_phone_rotate); if (quarter < 0) quarter = atomic_load(&g_auto_quarter);
 +        for (int k = 0; k < quarter; k++) { float t = as[0]; as[0] = -as[1]; as[1] = t; t = ws[0]; ws[0] = -ws[1]; ws[1] = t; }   // a quarter turn about z: (x, y) → (−y, x)
          dm_motion_set_switch(0, as, ws);
-@@ -138,2 +143,5 @@ static void phone_motion_start(UIView *body) {
+@@ -139,2 +144,5 @@ static void phone_motion_start(UIView *body) {
  double mtl_present_aspect(void);   // nvn_mtl.m: width / height of the picture the last present showed
 +// A known foldable's inner screen by the shape of its native size in pixels (either way round): the iPhone Duo's, 0.7035 wide to tall (2007 x 2853 at scale 3.0 in a landscape window, 1878 x 2670 at
 +// scale 2.8 in a portrait one: the size changes, the shape does not; the closed screen's is 0.687, an iPad's 0.69 to 0.75). The gyro rule and the portrait layout are for it
 +BOOL dm_foldable_inner_screen(CGSize px) { CGFloat lo = fmin(px.width, px.height), hi = fmax(px.width, px.height); return lo >= 1700 && fabs(lo / hi - 0.7035) < 0.0021; }
  
-@@ -170,3 +178,3 @@ @implementation DmGamepad {
+@@ -172,3 +180,3 @@ @implementation DmGamepad {
      UITouch *_editTouch; CGPoint _editLast;        // the finger dragging the selected control
 -    UIView *_panel; UILabel *_selLabel; UISlider *_slider; UISwitch *_showSwitch;
 +    UIView *_panel; UILabel *_selLabel; UISlider *_slider; UISwitch *_showSwitch; UIStackView *_mainStack;   // the panel: the control's settings
-     signed char _vis[2][E_N];                      // per layout (2D, 3D): 0 = built-in choice, 1 = the player turned the control on, 2 = off
-@@ -232,2 +240,5 @@ - (instancetype)initWithFrame:(CGRect)f {
+     signed char _ss[2];                            // the stick styles: 0 floating, 1 fixed, 2 off (right stick only), 3 floating and invisible
+@@ -239,2 +247,5 @@ - (instancetype)initWithFrame:(CGRect)f {
          [self padsChanged:nil];
 +        const char *pr = getenv("DM_PHONE_ROTATE"); int quarter = !pr || !*pr || !strcmp(pr, "auto") ? -1 : ((atoi(pr) % 4) + 4) % 4;
 +        atomic_store(&g_phone_rotate, quarter);
 +        if (quarter >= 0) LOG("front end: the phone's gyro is turned %d quarter turn(s) more (DM_PHONE_ROTATE)", quarter);
          motion_start();
-@@ -259,5 +270,23 @@ - (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → 2D: release e
+@@ -267,5 +278,23 @@ - (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → 2D: release e
  // ---- Layout (points; computed inside the safe area) ----
 -- (CGRect)safe { return UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets); }
 -- (CGRect)corner { UIEdgeInsets i = self.safeAreaInsets; i.left *= K_CORNER_IN; i.right *= K_CORNER_IN; return UIEdgeInsetsInsetRect(self.bounds, i); }   // the rectangle the bottom-corner controls use
@@ -215,14 +215,14 @@ index cdf92581..f65f2065 100644
 +- (CGRect)corner { UIEdgeInsets i = self.padInsets; i.left *= K_CORNER_IN; i.right *= K_CORNER_IN; return UIEdgeInsetsInsetRect(self.ctl, i); }   // the rectangle the bottom-corner controls use
 +- (CGFloat)u { CGRect c = self.ctl; CGFloat u = MIN(c.size.height / 430.0, 1.3); return self.portrait ? MIN(u, c.size.width / 690.0) : u; }   // 1 = 430 points tall (iPhone Pro Max landscape); in portrait also at most the width's worth
  static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPointMake(right ? CGRectGetMaxX(s) - dx : CGRectGetMinX(s) + dx, y); }
-@@ -282,4 +311,4 @@ - (CGPoint)stickCentre:(int)i { return i ? (stick_fixed_right() ? self.rightStic
+@@ -295,4 +324,4 @@ - (CGPoint)stickCentre:(int)i { return i ? ([self fixedR] ? self.rightStickHome
  - (CGFloat)stickR:(int)i { return i ? K_RSTICK_R * self.u : K_STICK_R * self.u * [self sc:E_STICK]; }
 -- (BOOL)inRightArea:(CGPoint)p { CGRect b = self.bounds; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
 -- (BOOL)inLeftArea:(CGPoint)p { CGRect b = self.bounds; return p.x <= CGRectGetMinX(b) + b.size.width * K_RSWIPE; }   // the floating left stick's area: the mirror of the right one's
 +- (BOOL)inRightArea:(CGPoint)p { CGRect b = self.bounds; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE && (!self.portrait || p.y >= CGRectGetMinY(self.ctl)); }   // portrait: only below the picture, so a touch on the picture stays the game's
 +- (BOOL)inLeftArea:(CGPoint)p { CGRect b = self.bounds; return p.x <= CGRectGetMinX(b) + b.size.width * K_RSWIPE && (!self.portrait || p.y >= CGRectGetMinY(self.ctl)); }   // the floating left stick's area: the mirror of the right one's
  - (CGPoint)dpadCenter { CGRect s = self.corner; CGFloat u = self.u; return add(side(s, 0, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u), [self off:E_DPAD]); }
-@@ -366,7 +395,4 @@ - (void)recompute {
+@@ -379,7 +408,4 @@ - (void)recompute {
  - (void)pushGame {
 -    CGRect b = self.bounds; CGFloat w = b.size.width, h = b.size.height;
 +    CGRect pr = self.pictureRect; CGFloat w = pr.size.width, h = pr.size.height, x0 = pr.origin.x, y0 = pr.origin.y;
@@ -231,25 +231,25 @@ index cdf92581..f65f2065 100644
 -    if (w / h > pa) w = h * pa; else h = w / pa;
 -    CGFloat x0 = (b.size.width - w) / 2, y0 = (b.size.height - h) / 2;
      dm_touch t[16]; int n = 0;
-@@ -489,7 +515,7 @@ - (void)enterEdit {
+@@ -519,7 +545,7 @@ - (void)enterEdit {
          }
--        UIStackView *col = [[UIStackView alloc] initWithArrangedSubviews:@[_selLabel, show, _slider, row]];
+-        UIStackView *col = [[UIStackView alloc] initWithArrangedSubviews:@[_selLabel, show, _slider, styles, row]];
 -        col.axis = UILayoutConstraintAxisVertical; col.spacing = 8; col.translatesAutoresizingMaskIntoConstraints = NO;
 -        [_panel addSubview:col];
 -        [NSLayoutConstraint activateConstraints:@[[col.leadingAnchor constraintEqualToAnchor:_panel.leadingAnchor constant:16], [col.trailingAnchor constraintEqualToAnchor:_panel.trailingAnchor constant:-16],
 -                                                   [col.topAnchor constraintEqualToAnchor:_panel.topAnchor constant:10], [col.bottomAnchor constraintEqualToAnchor:_panel.bottomAnchor constant:-6]]];
-+        _mainStack = [[UIStackView alloc] initWithArrangedSubviews:@[_selLabel, show, _slider, row]];
++        _mainStack = [[UIStackView alloc] initWithArrangedSubviews:@[_selLabel, show, _slider, styles, row]];
 +        _mainStack.axis = UILayoutConstraintAxisVertical; _mainStack.spacing = 8; _mainStack.translatesAutoresizingMaskIntoConstraints = NO;
 +        [_panel addSubview:_mainStack];
 +        [NSLayoutConstraint activateConstraints:@[[_mainStack.leadingAnchor constraintEqualToAnchor:_panel.leadingAnchor constant:16], [_mainStack.trailingAnchor constraintEqualToAnchor:_panel.trailingAnchor constant:-16],
 +                                                   [_mainStack.topAnchor constraintEqualToAnchor:_panel.topAnchor constant:10], [_mainStack.bottomAnchor constraintLessThanOrEqualToAnchor:_panel.bottomAnchor constant:-6]]];
          [self addSubview:_panel];
-@@ -505,3 +531,3 @@ - (void)layoutEditor {
+@@ -535,3 +561,3 @@ - (void)layoutEditor {
      if (!_panel) return;
--    CGRect s = self.safe; CGFloat w = MIN(340, s.size.width * 0.6), h = 152;
-+    CGRect s = self.safe; CGFloat w = MIN(340, s.size.width * 0.6), h = 150;
+-    CGRect s = self.safe; CGFloat w = MIN(400, s.size.width * 0.7), h = 268;
++    CGRect s = self.safe; CGFloat w = MIN(400, s.size.width * 0.7), h = 266;
      _panel.frame = CGRectMake(floor(CGRectGetMidX(s) - w / 2), floor(CGRectGetMidY(s) - h / 2), w, h);
-@@ -616,2 +642,19 @@ - (void)layoutSubviews {
+@@ -673,2 +699,19 @@ - (void)layoutSubviews {
      UIWindowScene *ws = self.window.windowScene; if (ws) atomic_store(&g_iface_orient, (int)ws.effectiveGeometry.interfaceOrientation);
 +    if (ws) {   // what the screen reports, once per change (a foldable's open / closed shows here): the facts a gyro correction for it is made from
 +        UIScreen *sc = ws.screen; CGRect nb = sc.nativeBounds; static CGRect lastB; static CGSize lastN; static int lastO;
@@ -4728,16 +4728,16 @@ index 5be3a4c2..3defef5b 100644
 +        UIRequiresFullScreen~ipad: true   # iPad only (as before). Without a value for the iPhone family the app is resizable there: the iPhone Duo shows a fixed-size app as a landscape window scaled into its portrait screen, so the portrait layout never got a portrait window
          UIStatusBarHidden: true
 diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
-index 3a14e38f..f6ad06c7 100644
+index 3a14e38f..bc764cfb 100644
 --- a/dm/tools/tests/test_launcher_settings.py
 +++ b/dm/tools/tests/test_launcher_settings.py
 @@ -64,3 +64,3 @@ class LauncherSettingsTests(unittest.TestCase):
          self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
 -        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_BAR_FILL'})
-+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PAD_EDIT', 'DM_PHONE_ROTATE', 'DM_BAR_FILL', 'DM_PORTRAIT_LAYOUT', 'DM_STICK_FLOAT_L', 'DM_STICK_FIXED_R'})
++        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PAD_EDIT', 'DM_PHONE_ROTATE', 'DM_BAR_FILL', 'DM_PORTRAIT_LAYOUT'})
          self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 770bd706..b31f8223 100644
+index b16e3074..372c2b45 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
 @@ -207,2 +207,4 @@ DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the mo
