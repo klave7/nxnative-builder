@@ -216,6 +216,12 @@ struct PatchesSection: View {
             }
             if m.patches.contains(where: { $0.state == .conflict }) || m.compat != nil || !m.compatNote.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
+                    if m.treeDirty && m.patches.contains(where: { $0.state == .conflict }) {
+                        Text("The copy holds an older version of the patches.").bold().foregroundColor(.orange)
+                        Text("Patches that were applied before the app was updated can no longer be recognised or taken off. This replaces the copy's changes with Seedds' files and applies all patches again.").font(.caption).foregroundColor(.secondary)
+                        Button("Start the patches over…") { Task { await m.reapplyPatches() } }.buttonStyle(.borderedProminent).disabled(!m.busy.isEmpty)
+                        Divider()
+                    }
                     Text("A patch does not fit Seedds' newest code.").bold().foregroundColor(.orange)
                     Text("The app can look back through Seedds' recent versions for the newest one where all three patches fit, and use that until the patches are updated.").font(.caption).foregroundColor(.secondary)
                     HStack {

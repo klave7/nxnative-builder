@@ -2,7 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: klave7 <5594473+klave7@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 -0600
 Subject: [PATCH] Blurred bars around the picture
-
 ---
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
 index 00e1ddd1..f188a156 100644
@@ -24,7 +23,7 @@ index 5bfdfeac..c0706bdf 100644
 +fragment float4 fs_blurv(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return blur9(t, s, in.uv, float2(0, 2.0 / t.get_height())); }
 +fragment float4 fs_dim(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return float4(t.sample(s, in.uv).rgb * 0.5, 1); }
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 8a9ef238..59c995df 100644
+index e80fa4c1..c8f7be47 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -464,3 +464,3 @@ void mtl_init(void) {
@@ -32,18 +31,18 @@ index 8a9ef238..59c995df 100644
 -        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
 +        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];   // 8 floats for the picture's crop, 8 for the bars' image (present_encode_m4)
          if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
-@@ -11086,2 +11086,3 @@ void mtl_exec(const uint8_t *p) {
+@@ -11319,2 +11319,3 @@ void mtl_exec(const uint8_t *p) {
  static id<MTLSamplerState> g_blit_samp;
 +static id<MTLRenderPipelineState> g_bar_blurh_pso, g_bar_blurv_pso, g_bar_dim_pso;   // the bars' blurred fill (present_pipeline, bar_prepare_m4)
  static uint64_t g_present_n;
-@@ -11434,2 +11435,6 @@ static void present_pipeline(MTLPixelFormat format) {
+@@ -11668,2 +11669,6 @@ static void present_pipeline(MTLPixelFormat format) {
          if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_blurh"]; g_bar_blurh_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_blurv"]; g_bar_blurv_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_dim"]; g_bar_dim_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        if (!g_bar_blurh_pso || !g_bar_blurv_pso || !g_bar_dim_pso) MDIE("present bar pipelines failed %s", e.localizedDescription.UTF8String);
          g_blit_fmt = format;
-@@ -11570,2 +11575,72 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
+@@ -11804,2 +11809,72 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
  }
 +// DM_BAR_FILL=blur: the bars around a letterboxed picture show a dimmed, blurred copy of it (the settings screen's "Bars around the picture"). The picture's valid rectangle is drawn into a small
 +// texture of the canvas's shape (128 wide), blurred along x and then y (taps two texels apart, so the blur spreads far and the texture stays small), and present_encode_m4 draws it over the
@@ -116,7 +115,7 @@ index 8a9ef238..59c995df 100644
 +    return bt[0];
 +}
  // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
-@@ -11578,7 +11653,19 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11812,7 +11887,19 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
 +    if (r[2] && r[3]) atomic_store_explicit(&g_present_aspect, (double)r[2] / (double)r[3], memory_order_relaxed);
      id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
@@ -137,7 +136,7 @@ index 8a9ef238..59c995df 100644
 -    rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
 +    rp.colorAttachments[0].loadAction = full || bg || img ? MTLLoadActionDontCare : MTLLoadActionClear;   // the bars' fill draws every pixel
      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-@@ -11591,7 +11678,10 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11825,7 +11912,10 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      [g_present_args setSamplerState:g_blit_samp.gpuResourceID atIndex:0];
 -    float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
 -    uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
@@ -152,7 +151,7 @@ index 8a9ef238..59c995df 100644
 +        [g_present_args setTexture:tex.gpuResourceID atIndex:0]; [g_present_args setAddress:uvb.gpuAddress atIndex:0];
 +    }
      [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
-@@ -11605,3 +11695,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
+@@ -11839,3 +11929,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
      id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
 -    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
 +    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];
@@ -4902,7 +4901,7 @@ literal 0
 HcmV?d00001
 
 diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
-index b941e777..77a2e35b 100644
+index 1a994ee4..bcbfd7ae 100644
 --- a/dm/ios/Sources/front_ios.m
 +++ b/dm/ios/Sources/front_ios.m
 @@ -18,2 +18,3 @@
@@ -4935,11 +4934,11 @@ index cd43d2d7..3a14e38f 100644
 +        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_BAR_FILL'})
          self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index fd7da194..d7ad8f38 100644
+index 95001cfd..f20bb827 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -12,2 +12,3 @@ DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing,
- DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
+@@ -13,2 +13,3 @@ DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update wi
+ DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)
 +DM_BAR_FILL	player	On iOS, `blur` (default; launcher setting **Bars around the picture**) fills the bars around a letterboxed picture with a dimmed, blurred copy of it (the game view is the whole screen and the present draws it, `bar_blur_m4` in `nvn_mtl.m`, also through MetalFX); `image` fills them with `bar_background.jpg` from the app, covering the canvas; `off` leaves them black
  DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 diff --git a/docs/settings.md b/docs/settings.md

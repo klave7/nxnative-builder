@@ -4,7 +4,6 @@ Date: Sun, 1 Nov 2026 12:00:00 -0600
 Subject: [PATCH] Portrait mode for the iPhone Duo
 
 Requires: 0001-blurred-bars, 0002-control-editor
-
 ---
 diff --git a/dm/games/settings.py b/dm/games/settings.py
 index d16b9cb9..fa824a8b 100644
@@ -27,7 +26,7 @@ index b5f678b2..3c1aca9d 100644
 +DM_PORTRAIT_LAYOUT	toggle	-	1	platform:ios	Controls	iPhone Duo portrait: game above the controls	Only for the iPhone Duo's inner screen held upright: the game on top, the controls below. Other phones and iPads stay landscape, whatever this says.	device=foldable
  DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 5d7b66bd..1d64d305 100644
+index c8f7be47..340b1164 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -464,3 +464,3 @@ void mtl_init(void) {
@@ -35,7 +34,7 @@ index 5d7b66bd..1d64d305 100644
 -        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];   // 8 floats for the picture's crop, 8 for the bars' image (present_encode_m4)
 +        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 24 options:MTLResourceStorageModeShared];   // 8 floats for the picture's crop, 8 for the bars' image, 8 for the controls' image (present_encode_m4)
          if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
-@@ -11663,3 +11663,18 @@ static void present_pipeline(MTLPixelFormat format) {
+@@ -11697,3 +11697,18 @@ static void present_pipeline(MTLPixelFormat format) {
  // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
 +// The portrait layout (front_ios.m: a screen taller than wide, the iPhone Duo's inner screen held upright): the canvas is split at g_split_y of its height from the top. The picture is centred in the top part
 +// (below g_split_top of the height, the camera's area), with the bars' fill around it; the lower part shows the controls' image (mtl_set_controls_image) behind the on-screen controls. Fractions of the
@@ -54,7 +53,7 @@ index 5d7b66bd..1d64d305 100644
 +        return (MTLViewport){floor((dw - cw * s) / 2), st + floor((rh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
 +    }
      double s = fmin(dw / cw, dh / ch);
-@@ -11792,11 +11807,11 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
+@@ -11826,11 +11841,11 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
  }
 -static CGImageRef g_bar_cg;                    // the image the front end handed over (retained)
 -static __strong id<MTLTexture> g_bar_img;      // its texture, made on the present thread at the first present that needs it (the device may not exist when the front end calls)
@@ -74,7 +73,7 @@ index 5d7b66bd..1d64d305 100644
 +    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
 +    if (!w || !h || w > 8192 || h > 8192) { MLOG("[RED] present: the %s image is %zux%zu, not used", what, w, h); CGImageRelease(cg); return nil; }
      uint8_t *px = calloc(w * h, 4); CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-@@ -11807,7 +11822,14 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
+@@ -11841,7 +11856,14 @@ static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
      id<MTLTexture> t = cx ? [g_dev newTextureWithDescriptor:d] : nil;
 -    if (t) { [t replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:px bytesPerRow:w * 4]; t.label = @"present bars image"; res_add(t); res_commit(); g_bar_img = t; atomic_store(&g_bar_img_aspect, (double)w / h);
 -        MLOG("present bars: the still image is %zux%zu", w, h); }
@@ -93,7 +92,7 @@ index 5d7b66bd..1d64d305 100644
 +    double w2 = ca > ia ? 1 : ca / ia, h2 = ca > ia ? ia / ca : 1;
 +    k[0] = (float)((1 - w2) / 2); k[1] = (float)((1 - h2) / 2); k[2] = (float)w2; k[3] = (float)h2; k[4] = 0; k[5] = 0; k[6] = 1; k[7] = 1;
  }
-@@ -11850,5 +11872,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11884,5 +11906,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      present_pipeline(dst.pixelFormat);
 -    double dw = dst.width, dh = dst.height;
 +    double dw = dst.width, dh = dst.height, st = 0, sy = 0;
@@ -102,7 +101,7 @@ index 5d7b66bd..1d64d305 100644
 -    int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
 +    int full = !split && vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
      if (r[2] && r[3]) atomic_store_explicit(&g_present_aspect, (double)r[2] / (double)r[3], memory_order_relaxed);
-@@ -11856,4 +11879,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11890,4 +11913,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
 -    int mode = !full && fx == &g_fx_present ? bar_mode() : 0;   // not in a screenshot's present
 -    id<MTLTexture> bg = nil, img = mode == 2 ? bar_image() : nil;
@@ -111,7 +110,7 @@ index 5d7b66bd..1d64d305 100644
 +    double bw = dw, bh = split ? sy : dh;   // the bars' region: the whole canvas, or the top part
 +    id<MTLTexture> bg = nil, img = mode == 2 ? bar_image() : nil, cimg = split && live ? ctl_image() : nil;
      float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
-@@ -11862,10 +11887,8 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11896,10 +11921,8 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
 -    if (mode == 1) bg = bar_blur_m4(cb, tex, uvb, dst.pixelFormat, dw, dh);
 -    if (img) {   // the image covers the canvas, cropped from its middle (constants in the buffer's second half)
@@ -126,7 +125,7 @@ index 5d7b66bd..1d64d305 100644
 -    rp.colorAttachments[0].loadAction = full || bg || img ? MTLLoadActionDontCare : MTLLoadActionClear;   // the bars' fill draws every pixel
 +    rp.colorAttachments[0].loadAction = full || (!split && (bg || img)) ? MTLLoadActionDontCare : MTLLoadActionClear;   // the bars' fill draws every pixel (with a split, the camera's area stays as cleared)
      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-@@ -11879,9 +11902,14 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -11913,9 +11936,14 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      [g_present_args setAddress:uvb.gpuAddress atIndex:0];
 -    if (bg || img) {   // the dimmed, blurred picture or the still image over the whole canvas, the sharp picture on top of it
 +    if (bg || img) {   // the dimmed, blurred picture or the still image over the bars' region, the sharp picture on top of it
@@ -144,7 +143,7 @@ index 5d7b66bd..1d64d305 100644
      }
 +    if (bg || img || cimg) { [g_present_args setTexture:tex.gpuResourceID atIndex:0]; [g_present_args setAddress:uvb.gpuAddress atIndex:0]; }
      [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
-@@ -11895,3 +11923,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
+@@ -11929,3 +11957,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
      id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
 -    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];
 +    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 24 options:MTLResourceStorageModeShared];
@@ -4729,19 +4728,19 @@ index 5be3a4c2..3defef5b 100644
 +        UIRequiresFullScreen~ipad: true   # iPad only (as before). Without a value for the iPhone family the app is resizable there: the iPhone Duo shows a fixed-size app as a landscape window scaled into its portrait screen, so the portrait layout never got a portrait window
          UIStatusBarHidden: true
 diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
-index cd43d2d7..f6ad06c7 100644
+index 3a14e38f..f6ad06c7 100644
 --- a/dm/tools/tests/test_launcher_settings.py
 +++ b/dm/tools/tests/test_launcher_settings.py
 @@ -64,3 +64,3 @@ class LauncherSettingsTests(unittest.TestCase):
          self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
--        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
+-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_BAR_FILL'})
 +        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PAD_EDIT', 'DM_PHONE_ROTATE', 'DM_BAR_FILL', 'DM_PORTRAIT_LAYOUT', 'DM_STICK_FLOAT_L', 'DM_STICK_FIXED_R'})
          self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 310ffdd8..3ec039eb 100644
+index 770bd706..b31f8223 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -206,2 +206,4 @@ DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the mo
+@@ -207,2 +207,4 @@ DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the mo
  DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
 +DM_PHONE_ROTATE	player	On iOS, `auto` (default; on iOS 27 and later none, since Core Motion delivers the samples in the picture's frame; on iOS 26 one quarter turn more on a known foldable's inner screen (recognized by its shape), in every orientation) or `<0..3>` (launcher setting **Gyro rotation**) turns the phone's gyro that many more quarter turns about the screen's normal, for a screen that sits turned against the phone's body (a foldable's inner screen)
 +DM_PORTRAIT_LAYOUT	player	On iOS, `0` turns off the portrait layout (default on; launcher setting **iPhone Duo portrait: game above the controls**): only on the iPhone Duo's inner screen held upright (every other iPhone and iPad stays landscape and is not affected), the picture is shown at the top of the screen and the on-screen controls are laid out below it (`DmGamepad.m`, `mtl_set_present_top`), instead of the picture centred with the controls over the whole screen

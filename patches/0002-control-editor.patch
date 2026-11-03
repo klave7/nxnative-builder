@@ -2,7 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: klave7 <5594473+klave7@users.noreply.github.com>
 Date: Sun, 1 Nov 2026 12:00:00 -0600
 Subject: [PATCH] In-game control editor, with floating and fixed stick styles
-
 ---
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
 index f188a156..b5f678b2 100644
@@ -395,14 +394,14 @@ index 7be062a5..cdf92581 100644
 +    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; if (any) [self leaveEdit]; [self reset]; });   // the touch gamepad hides while any controller is in use
  }
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 95001cfd..310ffdd8 100644
+index f20bb827..770bd706 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -202,2 +202,3 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
+@@ -203,2 +203,3 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
  DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 +DM_PAD_EDIT	player	`1` opens the on-screen control editor once when the game starts (iOS); launcher setting, **Edit controls at start**
  DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
-@@ -285,2 +286,4 @@ DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it
+@@ -286,2 +287,4 @@ DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it
  DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
 +DM_STICK_FIXED_R	player	`1` draws the 3D layout's right stick as a fixed one below the diamond instead of the floating swipe area (iOS); launcher setting, **Fixed right stick**
 +DM_STICK_FLOAT_L	player	`1` makes the touch gamepad's left stick float: centred where a touch lands in the left third of the screen (iOS); launcher setting, **Floating left stick**

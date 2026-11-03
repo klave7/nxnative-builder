@@ -167,6 +167,7 @@ struct Question: Identifiable {
 final class AppModel: ObservableObject {
     @Published var setup: [SetupItem] = []
     @Published var patches: [PatchItem] = []
+    @Published var treeDirty = false   // the copy has changes of its own: an older version of the patches may still be on it
     @Published var updates: Updates?
     @Published var jobs: [Job] = []
     @Published var keys = "" { didSet { save() } }
@@ -347,7 +348,8 @@ final class AppModel: ObservableObject {
         let p = await Task.detached { AppModel.checkPatches() }.value
         let ready = FileManager.default.fileExists(atPath: repoDir + "/.git")
         let head = ready ? await runAsync(["git", "log", "-1", "--format=%h, %cs"], cwd: repoDir).1 : ""
-        setup = s; patches = p; repoReady = ready; repoHead = head; checked = true
+        let dirty = ready ? await runAsync(["git", "status", "--porcelain", "--untracked-files=normal"], cwd: repoDir).1.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        setup = s; patches = p; repoReady = ready; repoHead = head; treeDirty = !dirty.isEmpty; checked = true
     }
 
     nonisolated static func checkSetup() -> [SetupItem] {
@@ -619,19 +621,43 @@ final class AppModel: ObservableObject {
         return out
     }
 
+    /// Puts one patch on the copy: the first variant that fits, else a three-way merge. False when nothing fit (the copy is then unchanged).
+    func applyQuietly(_ p: PatchItem) async -> Bool {
+        if let v = await Task.detached(operation: { AppModel.variant(p.path) }).value {
+            let ver = AppModel.applyVariants[v]
+            for f in AppModel.removeStale(p.path) { say("Removed the leftover \(f) from an earlier version of this patch.\n") }
+            if !ver.say.isEmpty { say(ver.say) }
+            return await stream(["git", "apply"] + ver.args + [p.path], cwd: repoDir) == 0
+        }
+        if await stream(["git", "apply", "--3way", p.path], cwd: repoDir) == 0 {
+            _ = await runAsync(["git", "reset", "-q"], cwd: repoDir)   // keep the changes in the working tree, not staged
+            return true
+        }
+        return false
+    }
     func applyPatch(_ p: PatchItem) async {
         guard await ask("Apply this patch?", "Changes files in the local nxnative copy to add: \(p.title)", command: "git apply \(p.name)", ok: "Apply") else { return }
         await work("Applying \(p.name)") {
-            if let v = await Task.detached(operation: { AppModel.variant(p.path) }).value {
-                let ver = AppModel.applyVariants[v]
-                for f in AppModel.removeStale(p.path) { say("Removed the leftover \(f) from an earlier version of this patch.\n") }
-                if !ver.say.isEmpty { say(ver.say) }
-                _ = await stream(["git", "apply"] + ver.args + [p.path], cwd: repoDir)
-            } else if await stream(["git", "apply", "--3way", p.path], cwd: repoDir) == 0 {
-                _ = await runAsync(["git", "reset", "-q"], cwd: repoDir)   // keep the changes in the working tree, not staged
-            } else {
-                say("The patch does not fit this version of nxnative (see above). Nothing was changed.\n")
+            if !(await applyQuietly(p)) { say("The patch does not fit this version of nxnative (see above). Nothing was changed.\n") }
+        }
+    }
+    /// Starts from Seedds' own files again and puts every patch on, in order. A patch the app no longer recognises (an older version of it is on the copy, so it neither goes on nor comes off) is no obstacle: the copy holds nothing but Seedds' commit and the patches, so all of it is replaced.
+    func reapplyPatches() async {
+        guard await ask("Start the patches over?", "Replaces every change in the local nxnative copy with Seedds' files at the current commit (\(repoHead)), then applies all \(patches.count) patches again. Use it when a patch shows as not fitting but Seedds' code did not change, e.g. after the app was updated with newer patches. Your games, settings and builds are not touched.",
+                        command: "git reset --hard HEAD; git clean -fd; git apply <each patch>", ok: "Start over") else { return }
+        await work("Applying the patches again") {
+            if await stream(["git", "reset", "--hard", "HEAD"], cwd: repoDir) != 0 { say("Could not reset the copy; nothing was changed.\n"); return }
+            _ = await stream(["git", "clean", "-fdq"], cwd: repoDir)   // the files patches add (git leaves ignored build files alone)
+            let files = AppModel.patchFiles().sorted { $0.0 < $1.0 }
+            let items = files.map { PatchItem(name: $0.0, title: AppModel.patchTitle($0.1), path: $0.1, state: .ready) }
+            for p in items {
+                say("Applying \(p.title) …\n")
+                if !(await applyQuietly(p)) {
+                    say("\n\(p.title) does not fit this version of nxnative (see above); the patches before it are on, this one and the ones after it are not. If Seedds changed the same code, use \"Find the newest version the patches fit\".\n")
+                    return
+                }
             }
+            say("All patches are on.\n")
         }
     }
     /// The way the patch went on, so that it comes off the same way
