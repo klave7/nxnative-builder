@@ -32,6 +32,8 @@ This makes `NxNative Builder.app` next to the script. To remake the icon from `i
 
 The patches in `patches/` apply to the Seedds main as of 2026-10-30. The bars and the control editor are independent: apply either one alone, or both in any order. Portrait mode needs both (a `Requires:` line in its header), so the app keeps it locked until they are on. When Seedds changes the same code, a patch shows a red mark in the app, and needs to be regenerated.
 
+**Patch updates without a new app.** The patches are also published from this repository's `patches/` folder (`VERSION`, `index.txt` and the `.patch` files). In the app, Patches > *Check for newer patches* (also done quietly when the app opens) offers a set with a higher number than the one in use; downloading it replaces the built-in set, and the app offers to put the patches on again. To publish: change the patches, run `./publish_patches.sh`, commit `patches/` and push to main.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). The patches modify seedds/nxnative (MIT, [notice](licenses/seedds-nxnative-LICENSE)).

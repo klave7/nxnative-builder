@@ -7,7 +7,8 @@ APP="NxNative Builder.app"
 rm -rf "$APP" .build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/patches" .build
 for a in arm64 x86_64; do swiftc -O -swift-version 5 -parse-as-library -target $a-apple-macos13.0 Sources/*.swift -o .build/app-$a; done
 lipo -create .build/app-arm64 .build/app-x86_64 -output "$APP/Contents/MacOS/NxNativeBuilder"
-cp patches/*.patch "$APP/Contents/Resources/patches/"
+(cd patches && ls *.patch > index.txt)   # the list the app reads when it looks for a newer patch set on GitHub
+cp patches/*.patch patches/VERSION "$APP/Contents/Resources/patches/"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"   # made by make_icon.swift from icon-source.png
 cat > "$APP/Contents/Info.plist" <<P
 <?xml version="1.0" encoding="UTF-8"?>
@@ -19,7 +20,7 @@ cat > "$APP/Contents/Info.plist" <<P
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleExecutable</key><string>NxNativeBuilder</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>26</string><key>CFBundleShortVersionString</key><string>2.11.0</string>
+<key>CFBundleVersion</key><string>27</string><key>CFBundleShortVersionString</key><string>2.12.0</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

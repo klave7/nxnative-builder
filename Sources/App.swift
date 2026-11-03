@@ -214,6 +214,13 @@ struct PatchesSection: View {
                 }
                 Divider()
             }
+            HStack {
+                Text("Patch set \(m.patchSetNow), " + (m.patchSetFromApp ? "built into this app" : "downloaded")).font(.caption).foregroundColor(.secondary)
+                Spacer()
+                if let o = m.patchSetOffer { Button("Download set \(o.version)…") { Task { await m.downloadPatchSet() } }.buttonStyle(.borderedProminent).disabled(!m.busy.isEmpty) }
+                Button("Check for newer patches") { Task { await m.checkPatchUpdates() } }.disabled(!m.busy.isEmpty)
+            }
+            if !m.patchSetNote.isEmpty { Text(m.patchSetNote).font(.caption).foregroundColor(.secondary) }
             if m.patches.contains(where: { $0.state == .conflict }) || m.compat != nil || !m.compatNote.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     if m.treeDirty && m.patches.contains(where: { $0.state == .conflict }) {
@@ -235,6 +242,7 @@ struct PatchesSection: View {
                 }
             }
         }
+        .task { m.refreshPatchSet(); await m.checkPatchUpdates(quiet: true) }   // a newer patch set is offered without being asked for
     }
 }
 

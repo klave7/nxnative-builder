@@ -510,13 +510,80 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
-    // MARK: patches (an ordered stack: each one goes on after the ones above it)
-    nonisolated static func patchFiles() -> [(String, String)] {
-        var found: [String: String] = [:]
-        for d in [(Bundle.main.resourcePath ?? "") + "/patches", dataDir + "/patches"] {
-            for n in ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []) where n.hasSuffix(".patch") { found[n] = d + "/" + n }
+    // MARK: patch updates (without a new app)
+    @Published var patchSetNow = 0
+    @Published var patchSetFromApp = true
+    @Published var patchSetOffer: (version: Int, names: [String])? = nil
+    @Published var patchSetNote = ""
+    func refreshPatchSet() { patchSetNow = AppModel.patchSetVersion(AppModel.patchSetDir); patchSetFromApp = AppModel.patchSetDir == AppModel.bundledPatchDir }
+
+    private func fetchText(_ name: String) async -> String? {
+        guard let url = URL(string: AppModel.patchSetURL + name) else { return nil }
+        var req = URLRequest(url: url); req.cachePolicy = .reloadIgnoringLocalCacheData; req.timeoutInterval = 20
+        guard let (data, resp) = try? await URLSession.shared.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200, data.count < 4_000_000 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+    /// Whether the app's repository holds a newer patch set than the one in use. Quiet: says nothing when offline.
+    func checkPatchUpdates(quiet: Bool = false) async {
+        refreshPatchSet()
+        guard let v = await fetchText("VERSION"), let n = Int(v.trimmingCharacters(in: .whitespacesAndNewlines)), let idx = await fetchText("index.txt") else {
+            if !quiet { patchSetNote = "Could not reach GitHub to look for newer patches." }
+            return
         }
-        return found.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+        let names = idx.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if n > patchSetNow && !names.isEmpty { patchSetOffer = (n, names); patchSetNote = "" }
+        else { patchSetOffer = nil; patchSetNote = quiet ? "" : "The patches are up to date (set \(patchSetNow))." }
+    }
+    /// Downloads the offered patch set next to the app's data (all of it or none), then offers to put the patches on again.
+    func downloadPatchSet() async {
+        guard let offer = patchSetOffer else { return }
+        guard await ask("Download the newer patches?", "Replaces the patches (set \(patchSetNow)) with set \(offer.version) from the app's GitHub page: \(offer.names.joined(separator: ", ")). The app itself stays as it is. Nothing in the nxnative copy changes until you apply them.",
+                        command: "download \(offer.names.count) patch file(s) from \(AppModel.patchSetURL)", ok: "Download") else { return }
+        var ok = false
+        await work("Downloading patches") {
+            let tmp = dataDir + "/patches.new"
+            try? FileManager.default.removeItem(atPath: tmp)
+            do {
+                try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+                for n in offer.names {
+                    guard n.range(of: #"^[0-9A-Za-z._-]+\.patch$"#, options: .regularExpression) != nil, !n.contains("..") else { throw NSError(domain: "patches", code: 1, userInfo: [NSLocalizedDescriptionKey: "unexpected file name \(n)"]) }
+                    guard let t = await fetchText(n), t.hasPrefix("From ") else { throw NSError(domain: "patches", code: 2, userInfo: [NSLocalizedDescriptionKey: "could not download \(n)"]) }
+                    try t.write(toFile: tmp + "/" + n, atomically: true, encoding: .utf8)
+                    say("Downloaded \(n)\n")
+                }
+                try "\(offer.version)\n".write(toFile: tmp + "/VERSION", atomically: true, encoding: .utf8)
+                try? FileManager.default.removeItem(atPath: AppModel.downloadedPatchDir)
+                try FileManager.default.moveItem(atPath: tmp, toPath: AppModel.downloadedPatchDir)
+                ok = true
+            } catch {
+                try? FileManager.default.removeItem(atPath: tmp)
+                say("Nothing was changed: \(error.localizedDescription)\n")
+            }
+        }
+        refreshPatchSet()
+        if ok {
+            patchSetOffer = nil; patchSetNote = "Patch set \(patchSetNow) is in use."
+            if patches.contains(where: { $0.state == .applied }) || treeDirty { await reapplyPatches() }   // the applied ones are the older set: start over with the new
+        }
+    }
+
+    // MARK: patches (an ordered stack: each one goes on after the ones above it)
+    /// The patch set: the one built into the app, or a newer one downloaded from the app's GitHub repository (patches can be published without a new app).
+    /// A set has a number (its VERSION file); the newer of the two is used, whole, so a patch that was dropped from a set is gone too.
+    nonisolated static let patchSetURL = "https://raw.githubusercontent.com/klave7/nxnative-builder/main/patches/"
+    nonisolated static var bundledPatchDir: String { (Bundle.main.resourcePath ?? "") + "/patches" }
+    nonisolated static var downloadedPatchDir: String { dataDir + "/patches" }
+    nonisolated static func patchSetVersion(_ dir: String) -> Int {
+        Int(((try? String(contentsOfFile: dir + "/VERSION", encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+    nonisolated static func patchSetHasPatches(_ dir: String) -> Bool { ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).contains { $0.hasSuffix(".patch") } }
+    nonisolated static var patchSetDir: String {
+        let d = downloadedPatchDir
+        return patchSetHasPatches(d) && patchSetVersion(d) > patchSetVersion(bundledPatchDir) ? d : bundledPatchDir
+    }
+    nonisolated static func patchFiles() -> [(String, String)] {
+        let d = patchSetDir
+        return ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.hasSuffix(".patch") }.sorted().map { ($0, d + "/" + $0) }
     }
 
     nonisolated static func patchTitle(_ path: String) -> String {
