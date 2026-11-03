@@ -1,19 +1,21 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: klave7 <5594473+klave7@users.noreply.github.com>
-Date: Sat, 31 Oct 2026 12:00:00 -0600
-Subject: [PATCH] In-game control editor
+Date: Sun, 1 Nov 2026 12:00:00 -0600
+Subject: [PATCH] In-game control editor, with floating and fixed stick styles
 
 ---
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index f188a156..9672a04d 100644
+index f188a156..b5f678b2 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
-@@ -26,2 +26,3 @@ DM_BAR_FILL	choice	off=Black,blur=Blurred picture,image=Still image	blur	platfor
+@@ -26,2 +26,5 @@ DM_BAR_FILL	choice	off=Black,blur=Blurred picture,image=Still image	blur	platfor
  DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 +DM_PAD_EDIT	toggle	-	0	platform:ios	Controls	Edit controls at start	Opens the control editor once when the game starts. You can also press and hold the layout button during play.
++DM_STICK_FLOAT_L	toggle	-	0	platform:ios	Controls	Floating left stick	The left stick appears where you put a finger down in the left third of the screen (on no button), instead of at a fixed place. Touches there no longer reach the game's own touch screen.
++DM_STICK_FIXED_R	toggle	-	0	platform:ios	Controls	Fixed right stick (3D layout)	Draws the right stick at a fixed place below the face buttons, like a Pro Controller's, instead of letting a touch in the right third be its centre.
  DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
-index 7be062a5..5ae75b2a 100644
+index 7be062a5..cdf92581 100644
 --- a/dm/ios/Sources/DmGamepad.m
 +++ b/dm/ios/Sources/DmGamepad.m
 @@ -14,2 +14,5 @@
@@ -32,12 +34,27 @@ index 7be062a5..5ae75b2a 100644
 +static NSString *const k_shown_key = @"DmPadShown";   // NSUserDefaults: for 2D and 3D, E_N numbers each: 0 = the layout's built-in choice, 1 = on, 2 = off
 +static const CGFloat K_SIZE_MIN = 0.5, K_SIZE_MAX = 1.6;
  static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
-@@ -132,3 +139,3 @@ static void phone_motion_start(UIView *body) {
+@@ -132,3 +139,8 @@ static void phone_motion_start(UIView *body) {
  
 -@interface DmGamepad : UIView
++// Stick styles (launcher settings, Controls): DM_STICK_FLOAT_L = the left stick floats (a touch landing on no control in the left third of the screen is its centre, as the right stick's in the right third);
++// DM_STICK_FIXED_R = the right stick (3D layout) is an ordinary fixed one, drawn below and inward of the diamond like a Pro Controller's, instead of the floating swipe area
++static BOOL stick_float_left(void) { const char *e = getenv("DM_STICK_FLOAT_L"); return e && atoi(e); }
++static BOOL stick_fixed_right(void) { const char *e = getenv("DM_STICK_FIXED_R"); return e && atoi(e); }
++
 +@interface DmGamepad : UIView <UIGestureRecognizerDelegate>
  @end
-@@ -153,2 +160,7 @@ @implementation DmGamepad {
+@@ -141,2 +153,3 @@ @implementation DmGamepad {
+     CGPoint _rCentre;                              // the right stick's centre: where its touch landed, dragged along past K_RSTICK_R
++    CGPoint _lCentre;                              // the left stick's centre while it floats (DM_STICK_FLOAT_L): the same
+     uint64_t _faceBits, _dpadBits, _btnBits;
+@@ -144,3 +157,4 @@ @implementation DmGamepad {
+     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
+-    CAShapeLayer *_ring, *_knob;                   // the left stick (the right one is not drawn)
++    CAShapeLayer *_ring, *_knob;                   // the left stick
++    CAShapeLayer *_ringR, *_knobR;                 // the right stick, drawn only as a fixed one (DM_STICK_FIXED_R)
+     CAShapeLayer *_swap; CATextLayer *_swapLabel; BOOL _swapHeld;
+@@ -153,2 +167,7 @@ @implementation DmGamepad {
      UITouch *_game[16];                            // touches on the game's touch screen by finger slot
 +    float _dx[E_N], _dy[E_N], _sz[E_N];            // the player's offset (u) and size factor of each control
 +    BOOL _edit; int _sel;                          // the editor is open / the control being edited (-1 none)
@@ -45,11 +62,18 @@ index 7be062a5..5ae75b2a 100644
 +    UIView *_panel; UILabel *_selLabel; UISlider *_slider; UISwitch *_showSwitch;
 +    signed char _vis[2][E_N];                      // per layout (2D, 3D): 0 = built-in choice, 1 = the player turned the control on, 2 = off
  }
-@@ -167,3 +179,2 @@ @implementation DmGamepad {
+@@ -167,3 +186,2 @@ @implementation DmGamepad {
  }
 -static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   // keys shown only in the 3D layout
  
-@@ -198,4 +209,9 @@ - (instancetype)initWithFrame:(CGRect)f {
+@@ -189,2 +207,6 @@ - (instancetype)initWithFrame:(CGRect)f {
+         [_knob addSublayer:in];
++        _ringR = shape(_controls); _ringR.fillColor = k_ringFill.CGColor;
++        _knobR = shape(_controls);
++        CAShapeLayer *inR = [CAShapeLayer layer]; inR.fillColor = nil; inR.strokeColor = k_line.CGColor; inR.lineWidth = 1.5;
++        [_knobR addSublayer:inR];
+         static NSString *const names[B_N] = {@"A", @"B", @"X", @"Y", @"L3", @"R3", @"L", @"R", @"ZL", @"ZR", @"+", @"−"};
+@@ -198,4 +220,9 @@ - (instancetype)initWithFrame:(CGRect)f {
          if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
 -        _full = l == 1; _tap = l == 2;
 +        _full = l == 1; _tap = l == 2; _sel = -1;
@@ -60,7 +84,7 @@ index 7be062a5..5ae75b2a 100644
 +        UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(holdSwap:)]; hold.minimumPressDuration = 0.7; hold.delegate = self;
 +        [self addGestureRecognizer:hold];   // press and hold the layout button: the editor (it cancels the touch, so the release does not change the layout)
          NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-@@ -207,2 +223,7 @@ - (instancetype)initWithFrame:(CGRect)f {
+@@ -207,2 +234,7 @@ - (instancetype)initWithFrame:(CGRect)f {
          phone_motion_start(self);
 +        const char *ed = getenv("DM_PAD_EDIT");
 +        if (ed && atoi(ed)) {   // "Edit controls at start": once (the saved choice is forgotten, so the next start plays)
@@ -68,14 +92,15 @@ index 7be062a5..5ae75b2a 100644
 +            dispatch_async(dispatch_get_main_queue(), ^{ [self enterEdit]; });
 +        }
      }
-@@ -212,4 +233,4 @@ - (void)applyLayout {   // show / hide the controls for the current layout
+@@ -212,4 +244,5 @@ - (void)applyLayout {   // show / hide the controls for the current layout
      [CATransaction begin]; [CATransaction setDisableActions:YES];
 -    for (int b = 0; b < B_N; b++) _key[b].hidden = _tap || (fullOnly(b) && !_full);
 -    _ring.hidden = _knob.hidden = _tap;
 +    for (int b = 0; b < B_N; b++) { BOOL on = [self on:keyElem(b)]; _key[b].hidden = _tap || (!on && !_edit); _key[b].opacity = on ? 1 : 0.3; }   // the editor shows a control that is off, dimmed
 +    BOOL son = [self on:E_STICK]; _ring.hidden = _tap || (!son && !_edit); _knob.hidden = _tap || !son; _ring.opacity = son ? 1 : 0.3;
++    _ringR.hidden = _knobR.hidden = _tap || !_full || !stick_fixed_right();
      _swapLabel.string = _tap ? @"Tap" : _full ? @"3D" : @"2D";
-@@ -230,13 +251,23 @@ - (CGFloat)u { return MIN(self.bounds.size.height / 430.0, 1.3); }   // 1 = 430
+@@ -230,13 +263,25 @@ - (CGFloat)u { return MIN(self.bounds.size.height / 430.0, 1.3); }   // 1 = 430
  static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPointMake(right ? CGRectGetMaxX(s) - dx : CGRectGetMinX(s) + dx, y); }
 -- (CGPoint)faceCenter { CGRect s = self.corner; CGFloat u = self.u; return side(s, 1, K_FACE_X * u, CGRectGetMaxY(s) - K_PAD_Y * u); }
 -- (CGFloat)faceGap { return K_FACE_GAP * self.u; }
@@ -96,17 +121,20 @@ index 7be062a5..5ae75b2a 100644
  - (CGPoint)facePos:(int)b { CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
      switch (b) { case B_A: return CGPointMake(c.x + g, c.y); case B_B: return CGPointMake(c.x, c.y + g); case B_X: return CGPointMake(c.x, c.y - g); default: return CGPointMake(c.x - g, c.y); } }
 -- (CGPoint)stickHome { CGRect s = self.corner; return side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u); }   // the left stick's ring centre
-+- (CGPoint)stickHome { CGRect s = self.corner; return add(side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u), [self off:E_STICK]); }   // the left stick's ring centre
- - (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
+-- (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
 -- (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
++- (CGPoint)stickHome { CGRect s = self.corner; return add(side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u), [self off:E_STICK]); }   // the left stick's ring centre
++- (CGPoint)rightStickHome { CGRect s = self.corner; return side(s, 1, K_LOW_X * self.u, CGRectGetMaxY(s) - K_LOW_Y * self.u); }   // the fixed right stick: the D-pad's place mirrored (below and inward of the diamond)
++- (CGPoint)stickCentre:(int)i { return i ? (stick_fixed_right() ? self.rightStickHome : _rCentre) : (stick_float_left() && _stick[0] ? _lCentre : self.stickHome); }
 +- (CGFloat)stickR:(int)i { return i ? K_RSTICK_R * self.u : K_STICK_R * self.u * [self sc:E_STICK]; }
  - (BOOL)inRightArea:(CGPoint)p { CGRect b = self.bounds; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
 -- (CGPoint)dpadCenter { CGRect s = self.corner; CGFloat u = self.u; return side(s, 0, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u); }
 -- (CGFloat)dpadR { return K_DPAD_R * self.u; }
++- (BOOL)inLeftArea:(CGPoint)p { CGRect b = self.bounds; return p.x <= CGRectGetMinX(b) + b.size.width * K_RSWIPE; }   // the floating left stick's area: the mirror of the right one's
 +- (CGPoint)dpadCenter { CGRect s = self.corner; CGFloat u = self.u; return add(side(s, 0, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u), [self off:E_DPAD]); }
 +- (CGFloat)dpadR { return K_DPAD_R * self.u * [self sc:E_DPAD]; }
  static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
-@@ -244,7 +275,8 @@ - (CGFloat)dpadR { return K_DPAD_R * self.u; }
+@@ -244,7 +289,8 @@ - (CGFloat)dpadR { return K_DPAD_R * self.u; }
  - (CGPoint)dropCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; BOOL z = b == B_ZL || b == B_ZR;
 -    return side(s, b == B_ZR || b == B_R, (z ? K_ZL_X : K_L_X) * u, CGRectGetMinY(s) + (z ? K_ZL_Y : K_L_Y) * u); }
 -- (CGFloat)dropR:(int)b { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * self.u; }
@@ -120,7 +148,7 @@ index 7be062a5..5ae75b2a 100644
 +- (CGRect)pillRect:(int)b { CGRect s = self.safe; CGFloat u = self.u, k = [self sc:elemOf(b)], w = K_PILL_W * u * k, h = K_PILL_H * u * k;
 +    CGPoint c = add(CGPointMake(CGRectGetMidX(s) + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u, CGRectGetMinY(s) + K_PILL_Y * u), [self off:elemOf(b)]);   // − on the left, + on the right
      return CGRectMake(c.x - w / 2, c.y - h / 2, w, h); }
-@@ -256,5 +288,5 @@ - (int)btnAt:(CGPoint)p {   // locked keys (tested on touch-down only, then lock
+@@ -256,5 +302,5 @@ - (int)btnAt:(CGPoint)p {   // locked keys (tested on touch-down only, then lock
      for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
 -        if (fullOnly(b) && !_full) continue;
 +        if (![self on:elemOf(b)]) continue;
@@ -128,28 +156,40 @@ index 7be062a5..5ae75b2a 100644
 -                 : isClick(b) ? dist(p, [self clickCenter:b]) <= K_CLICK_R * u * 1.35
 +                 : isClick(b) ? dist(p, [self clickCenter:b]) <= [self clickR:b] * 1.35
                   : CGRectContainsPoint(CGRectInset([self pillRect:b], -8 * u, -8 * u), p);
-@@ -337,2 +369,3 @@ - (BOOL)gameBegin:(UITouch *)t {
+@@ -337,2 +383,3 @@ - (BOOL)gameBegin:(UITouch *)t {
  - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
 +    if (_edit) { [self editBegan:ts]; return; }
      BOOL game = NO;
-@@ -346,5 +379,5 @@ - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+@@ -346,6 +393,8 @@ - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
          CGFloat best = 1; int kind = C_NONE, idx = 0;
 -        CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; }
 -        if (_full) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
 -        if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
+-        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
 +        CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if ([self on:E_FACE] && f <= best) { best = f; kind = C_FACE; }
 +        if ([self on:E_DPAD]) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
-+        if (!_stick[0] && [self on:E_STICK]) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
-         if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
-@@ -359,2 +392,3 @@ - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
++        if (!_stick[0] && [self on:E_STICK] && !stick_float_left()) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; idx = 0; } }
++        if (_full && !_stick[1] && stick_fixed_right()) { CGFloat s = dist(p, self.rightStickHome) / ([self stickR:1] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; idx = 1; } }
++        if (kind == C_NONE && stick_float_left() && !_stick[0] && [self on:E_STICK] && [self inLeftArea:p]) { kind = C_STICK; idx = 0; _lCentre = p; }   // a floating left stick: centred where the touch lands
++        if (kind == C_NONE && _full && !_stick[1] && !stick_fixed_right() && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
+         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
+@@ -359,2 +408,3 @@ - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
  - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
 +    if (_edit) { [self editMoved:ts]; return; }
      BOOL game = NO;
-@@ -372,2 +406,3 @@ - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+@@ -364,4 +414,5 @@ - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+         else if (c == C_STICK) { _stickNow[v >> 8] = p;
+-            if ((v >> 8) == 1) { CGFloat d = dist(p, _rCentre), R = [self stickR:1];   // the right stick's centre follows a finger past its radius, so turning back responds at once
+-                if (d > R) _rCentre = CGPointMake(p.x - (p.x - _rCentre.x) * R / d, p.y - (p.y - _rCentre.y) * R / d); } }
++            int si = (int)(v >> 8);
++            if (si ? !stick_fixed_right() : stick_float_left()) { CGPoint *cp = si ? &_rCentre : &_lCentre; CGFloat d = dist(p, *cp), R = [self stickR:si];   // a floating stick's centre follows a finger past its radius, so turning back responds at once
++                if (d > R) *cp = CGPointMake(p.x - (p.x - cp->x) * R / d, p.y - (p.y - cp->y) * R / d); } }
+         else if (c == C_GAME) game = YES;
+@@ -372,2 +423,3 @@ - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
  - (void)endTouches:(NSSet<UITouch *> *)ts tapped:(BOOL)ended {
 +    if (_edit) { [self editEnded:ts]; return; }
      BOOL swap = NO, game = NO;
-@@ -387,2 +422,146 @@ - (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0]
+@@ -387,2 +439,146 @@ - (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0]
  
 +// ---- Editor ----
 +// A finger drags the control it lands on (the one whose grab radius it is nearest to); the panel's slider sizes the selected control. Nothing reaches the game meanwhile.
@@ -296,12 +336,12 @@ index 7be062a5..5ae75b2a 100644
 +}
 +
  // ---- Shapes ----
-@@ -423,3 +602,3 @@ - (void)layoutSubviews {
+@@ -423,3 +619,3 @@ - (void)layoutSubviews {
      _controls.frame = self.layer.bounds;
 -    for (int b = B_A; b <= B_Y; b++) { CGPoint c = [self facePos:b]; setPath(_key[b], circlePath(c, self.faceR)); placeLabel(_label[b], c, 20 * u); }
 +    for (int b = B_A; b <= B_Y; b++) { CGPoint c = [self facePos:b]; setPath(_key[b], circlePath(c, self.faceR)); placeLabel(_label[b], c, 20 * u * [self sc:E_FACE]); }
      for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
-@@ -427,8 +606,8 @@ - (void)layoutSubviews {
+@@ -427,8 +623,8 @@ - (void)layoutSubviews {
              BOOL right = b == B_ZR || b == B_R; CGPoint c = [self dropCenter:b];
 -            setPath(_key[b], dropPath(c, [self dropR:b], right ? -M_PI_4 : -3 * M_PI_4, 4 * u)); placeLabel(_label[b], c, 16 * u);   // tip toward the near top corner
 +            CGFloat k = [self sc:elemOf(b)]; setPath(_key[b], dropPath(c, [self dropR:b], right ? -M_PI_4 : -3 * M_PI_4, 4 * u * k)); placeLabel(_label[b], c, 16 * u * k);   // tip toward the near top corner
@@ -313,7 +353,7 @@ index 7be062a5..5ae75b2a 100644
 -            setPath(_key[b], CGPathCreateWithRoundedRect(rc, rc.size.height / 2, rc.size.height / 2, NULL)); placeLabel(_label[b], CGPointMake(CGRectGetMidX(rc), CGRectGetMidY(rc)), 18 * u);
 +            setPath(_key[b], CGPathCreateWithRoundedRect(rc, rc.size.height / 2, rc.size.height / 2, NULL)); placeLabel(_label[b], CGPointMake(CGRectGetMidX(rc), CGRectGetMidY(rc)), 18 * u * [self sc:elemOf(b)]);
          }
-@@ -436,6 +615,7 @@ - (void)layoutSubviews {
+@@ -436,6 +632,7 @@ - (void)layoutSubviews {
      static const struct { int b; CGFloat angle; } arms[] = {{B_UP, 0}, {B_RIGHT, M_PI_2}, {B_DOWN, M_PI}, {B_LEFT, -M_PI_2}};   // the same arm in 90° steps
 -    for (int i = 0; i < 4; i++) setPath(_key[arms[i].b], armPath(self.dpadCenter, self.dpadR, K_ARM_W * u, K_ARM_IN * u, arms[i].angle, 6 * u));
 +    CGFloat ds = [self sc:E_DPAD];
@@ -323,27 +363,47 @@ index 7be062a5..5ae75b2a 100644
 -    CGFloat k = K_KNOB_R * u; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
 +    CGFloat k = K_KNOB_R * u * [self sc:E_STICK]; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
      setPath(_knob, circlePath(CGPointMake(k, k), k));
-@@ -444,2 +624,3 @@ - (void)layoutSubviews {
+@@ -443,3 +640,9 @@ - (void)layoutSubviews {
+     in.frame = _knob.bounds; in.path = ip; CGPathRelease(ip);
++    setPath(_ringR, circlePath(self.rightStickHome, [self stickR:1]));
++    CGFloat kr = K_KNOB_R * u * 0.8; _knobR.bounds = CGRectMake(0, 0, 2 * kr, 2 * kr);
++    setPath(_knobR, circlePath(CGPointMake(kr, kr), kr));
++    CAShapeLayer *inR = (CAShapeLayer *)_knobR.sublayers.firstObject; CGPathRef ipR = circlePath(CGPointMake(kr, kr), kr * 0.62);
++    inR.frame = _knobR.bounds; inR.path = ipR; CGPathRelease(ipR);
      [CATransaction commit];
 +    [self layoutEditor];
      [self refresh];
-@@ -451,3 +632,5 @@ - (void)refresh {   // pressed state → fill, sticks → knob position
+@@ -451,6 +654,13 @@ - (void)refresh {   // pressed state → fill, sticks → knob position
      for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
 -        _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
 +        _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor;
 +        BOOL sel = _edit && keyElem(b) == _sel; _key[b].strokeColor = (sel ? UIColor.whiteColor : k_line).CGColor; _key[b].lineWidth = sel ? 3.5 : 1.5; }
 +    BOOL ss = _edit && _sel == E_STICK; _ring.strokeColor = (ss ? UIColor.whiteColor : k_line).CGColor; _ring.lineWidth = ss ? 3.5 : 1.5;
      _swap.fillColor = (_swapHeld ? k_on : k_idle).CGColor; _swapLabel.foregroundColor = (_swapHeld ? k_textOn : k_text).CGColor;
-@@ -528,3 +711,3 @@ - (void)padsChanged:(NSNotification *)note {
+     CGPoint h = self.stickHome, o = [self knobOffset:0];
+-    _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
++    BOOL fl = stick_float_left() && !_edit, lon = [self on:E_STICK];   // a floating stick is drawn only while held (the editor still shows where its home is)
++    _ring.hidden = _tap || (!lon && !_edit) || (fl && !_stick[0]); _knob.hidden = _tap || !lon || (fl && !_stick[0]);
++    CGPoint lc = [self stickCentre:0]; _ring.position = CGPointMake(lc.x - h.x, lc.y - h.y);   // the ring's path is built at the home; a floating stick moves it to its centre
++    _knob.position = CGPointMake(lc.x + o.x, lc.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
++    CGPoint hr = self.rightStickHome, orr = [self knobOffset:1];
++    _knobR.position = CGPointMake(hr.x + orr.x, hr.y + orr.y); _knobR.fillColor = (_stick[1] ? k_on : k_idle).CGColor;
+     [CATransaction commit];
+@@ -528,3 +738,3 @@ - (void)padsChanged:(NSNotification *)note {
      BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
 -    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
 +    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; if (any) [self leaveEdit]; [self reset]; });   // the touch gamepad hides while any controller is in use
  }
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index d7ad8f38..9dc55b64 100644
+index 95001cfd..310ffdd8 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -199,2 +199,3 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
+@@ -202,2 +202,3 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
  DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 +DM_PAD_EDIT	player	`1` opens the on-screen control editor once when the game starts (iOS); launcher setting, **Edit controls at start**
  DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
+@@ -285,2 +286,4 @@ DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it
+ DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
++DM_STICK_FIXED_R	player	`1` draws the 3D layout's right stick as a fixed one below the diamond instead of the floating swipe area (iOS); launcher setting, **Fixed right stick**
++DM_STICK_FLOAT_L	player	`1` makes the touch gamepad's left stick float: centred where a touch lands in the left third of the screen (iOS); launcher setting, **Floating left stick**
+ DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
