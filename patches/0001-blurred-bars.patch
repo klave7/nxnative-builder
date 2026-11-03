@@ -1,16 +1,16 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: klave7 <5594473+klave7@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 -0600
-Subject: [PATCH] Picture setting: blurred or still-image bars around the picture
+Subject: [PATCH] Picture setting: stretch, blurred or still-image bars around the picture
 ---
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index baf796e5..50d4a3cc 100644
+index baf796e5..eb21f98f 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
 @@ -24,3 +24,3 @@ DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=bas
  DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 -DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
-+DM_PICTURE_FIT	choice	fit=Fit,blur=Fit with blurred bars,image=Fit with still-image bars,fill=Fill	blur	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game. Fit shows black bars where the screen has another shape; the blurred bars are a dimmed, blurred copy of the picture (a little more GPU time), the still-image bars a fixed dark pattern.
++DM_PICTURE_FIT	choice	fit=Fit,blur=Fit with blurred bars,image=Fit with still-image bars,fill=Fill,stretch=Stretch	blur	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game. Fit shows black bars where the screen has another shape; the blurred bars are a dimmed, blurred copy of the picture (a little more GPU time), the still-image bars a fixed dark pattern. Stretch fills the whole screen by changing the picture's shape: everything looks wider or taller than it is.
  DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 diff --git a/dm/gfx/msl/present.metal b/dm/gfx/msl/present.metal
 index 5bfdfeac..a29e3f28 100644
@@ -24,7 +24,7 @@ index 5bfdfeac..a29e3f28 100644
 +fragment float4 fs_blurv(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return blur9(t, s, in.uv, float2(0, 2.0 / t.get_height())); }
 +fragment float4 fs_dim(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return float4(t.sample(s, in.uv).rgb * 0.5, 1); }
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 58683b04..f27ebe56 100644
+index c67dc2ce..3062a7e0 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -464,3 +464,3 @@ void mtl_init(void) {
@@ -32,18 +32,25 @@ index 58683b04..f27ebe56 100644
 -        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
 +        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];   // 8 floats for the picture's crop, 8 for the bars' image (present_encode_m4)
          if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
-@@ -11601,2 +11601,3 @@ void mtl_exec(const uint8_t *p) {
+@@ -11619,2 +11619,3 @@ void mtl_exec(const uint8_t *p) {
  static id<MTLSamplerState> g_blit_samp;
 +static id<MTLRenderPipelineState> g_bar_blurh_pso, g_bar_blurv_pso, g_bar_dim_pso;   // the bars' blurred fill (present_pipeline, bar_prepare_m4)
  static uint64_t g_present_n;
-@@ -11950,2 +11951,6 @@ static void present_pipeline(MTLPixelFormat format) {
+@@ -11968,2 +11969,6 @@ static void present_pipeline(MTLPixelFormat format) {
          if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_blurh"]; g_bar_blurh_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_blurv"]; g_bar_blurv_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        pd.fragmentFunction = [lib newFunctionWithName:@"fs_dim"]; g_bar_dim_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
 +        if (!g_bar_blurh_pso || !g_bar_blurv_pso || !g_bar_dim_pso) MDIE("present bar pipelines failed %s", e.localizedDescription.UTF8String);
          g_blit_fmt = format;
-@@ -12204,2 +12209,74 @@ static int up_mfx_encode(NvShader *cs) {
+@@ -11992,3 +11997,6 @@ static void present_pipeline(MTLPixelFormat format) {
+ // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
++static _Atomic int g_present_stretch;   // DM_PICTURE_FIT=stretch: the picture fills the whole canvas, its shape changed to the screen's
++void mtl_set_picture_stretch(int on) { if (atomic_exchange(&g_present_stretch, on != 0) != (on != 0)) MLOG("present picture: %s", on ? "stretched over the canvas" : "fitted"); }
+ static MTLViewport present_viewport(double cw, double ch, double dw, double dh) {
++    if (atomic_load_explicit(&g_present_stretch, memory_order_relaxed)) return (MTLViewport){0, 0, dw, dh, 0, 1};
+     double s = fmin(dw / cw, dh / ch);
+@@ -12222,2 +12230,74 @@ static int up_mfx_encode(NvShader *cs) {
  }
 +// DM_PICTURE_FIT=blur: the bars around a letterboxed picture show a dimmed, blurred copy of it (the Picture setting, "Fit with blurred bars"). The picture's valid rectangle is drawn into a small
 +// texture of the canvas's shape (128 wide), blurred along x and then y (taps two texels apart, so the blur spreads far and the texture stays small), and present_encode_m4 draws it over the
@@ -118,7 +125,7 @@ index 58683b04..f27ebe56 100644
 +    return bt[0];
 +}
  // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
-@@ -12212,7 +12289,19 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -12230,7 +12310,19 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
 +    if (r[2] && r[3]) atomic_store_explicit(&g_present_aspect, (double)r[2] / (double)r[3], memory_order_relaxed);
      id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
@@ -139,7 +146,7 @@ index 58683b04..f27ebe56 100644
 -    rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
 +    rp.colorAttachments[0].loadAction = full || bg || img ? MTLLoadActionDontCare : MTLLoadActionClear;   // the bars' fill draws every pixel
      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-@@ -12225,7 +12314,10 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -12243,7 +12335,10 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      [g_present_args setSamplerState:g_blit_samp.gpuResourceID atIndex:0];
 -    float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
 -    uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
@@ -154,7 +161,7 @@ index 58683b04..f27ebe56 100644
 +        [g_present_args setTexture:tex.gpuResourceID atIndex:0]; [g_present_args setAddress:uvb.gpuAddress atIndex:0];
 +    }
      [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
-@@ -12239,3 +12331,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
+@@ -12257,3 +12352,3 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
      id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
 -    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
 +    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];
@@ -4890,34 +4897,37 @@ literal 0
 HcmV?d00001
 
 diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
-index 99430e87..571474ab 100644
+index 6238a706..b2050749 100644
 --- a/dm/ios/Sources/front_ios.m
 +++ b/dm/ios/Sources/front_ios.m
-@@ -20,2 +20,4 @@
+@@ -20,2 +20,5 @@
  
 +void mtl_set_bar_image(CGImageRef img);   // nvn_mtl.m: the still image for the bars (DM_PICTURE_FIT=image)
++void mtl_set_picture_stretch(int on);   // nvn_mtl.m: the picture fills the canvas whatever its shape (DM_PICTURE_FIT=stretch)
 +void mtl_set_bar_mode(int mode);   // nvn_mtl.m: 0 black bars, 1 blurred picture, 2 still image
  void front_ios_boot(void);
-@@ -90,2 +92,3 @@ - (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
+@@ -90,2 +93,4 @@ - (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
  #endif
++@property (nonatomic) BOOL stretch;   // DM_PICTURE_FIT=stretch: the picture is stretched over the whole screen in the overlay layout (its shape changes)
 +@property (nonatomic) BOOL barFill;   // DM_PICTURE_FIT=blur or image (Fit with the bars filled): in the overlay layout the game view is the whole screen, and the present fits the picture in it and fills the bars (nvn_mtl.m)
  - (void)startGame;
-@@ -94,2 +97,3 @@ - (void)showFPS:(BOOL)on;
+@@ -94,2 +99,3 @@ - (void)showFPS:(BOOL)on;
  static DmRootVC *g_root;
 +static void bar_fill_set(DmRootVC *root, const char *m);
  static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
-@@ -152,3 +156,4 @@ - (void)startGame {
+@@ -152,3 +158,4 @@ - (void)startGame {
      self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
 -    self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
 +    bar_fill_set(self, getenv("DM_PICTURE_FIT"));
 +    self.game =[[DmGameView alloc] initWithFrame:self.view.bounds];
      [self.view addSubview:self.game];
-@@ -185,3 +190,3 @@ - (void)viewDidLayoutSubviews {
+@@ -185,3 +192,4 @@ - (void)viewDidLayoutSubviews {
      DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
 -    if (!onTV) self.game.frame = layout.game;
++    if (self.stretch && !onTV && !layout.separated) layout.game = b;   // Stretch: the picture is the whole screen (a portrait or tabletop split keeps it fitted, as Fill does)
 +    if (!onTV) self.game.frame = self.barFill && !self.fill && !layout.separated ? b : layout.game;   // filling the bars, the picture view is the whole screen and the present fits the picture inside it
      layout.topSafeOnly = duoPortrait;
-@@ -256,2 +261,13 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
+@@ -256,2 +264,14 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
  
 +// Fit with the bars filled (DM_PICTURE_FIT blur or image): the view is the whole screen and the present fits the picture in it (nvn_mtl.m). The still image is read the first time it is wanted
 +static void bar_fill_set(DmRootVC *root, const char *m) {
@@ -4929,24 +4939,35 @@ index 99430e87..571474ab 100644
 +        if (img.CGImage) mtl_set_bar_image(img.CGImage); else LOG("[RED] front end: bar_background.jpg is not in the app, the bars stay black");
 +    }
 +    root.barFill = mode != 0; mtl_set_bar_mode(mode);
++    root.stretch = m && !strcmp(m, "stretch"); mtl_set_picture_stretch(root.stretch);
 +}
  // The settings the in-game menu offers (GameMenu.swift, from the gamepad's menu button), each taking effect while the game runs; the launcher's other settings need the next start.
-@@ -262,3 +278,3 @@ bool dm_setting_live(const char *env, const char *value) {
+@@ -262,3 +282,3 @@ bool dm_setting_live(const char *env, const char *value) {
      if (!strcmp(env, "DM_PICTURE_FIT")) {
 -        if (value) { g_root.fill = dm_picture_fill(value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", g_root.fill ? "Fill" : "Fit"); }
-+        if (value) { g_root.fill = dm_picture_fill(value); bar_fill_set(g_root, value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", g_root.fill ? "Fill" : !strcmp(value, "blur") ? "Fit, blurred bars" : !strcmp(value, "image") ? "Fit, still-image bars" : "Fit"); }
++        if (value) { g_root.fill = dm_picture_fill(value); bar_fill_set(g_root, value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", g_root.fill ? "Fill" : !strcmp(value, "blur") ? "Fit, blurred bars" : !strcmp(value, "image") ? "Fit, still-image bars" : !strcmp(value, "stretch") ? "Stretch" : "Fit"); }
          return true;
+diff --git a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+index 84efd5df..caa3e3db 100644
+--- a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
++++ b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+@@ -104,2 +104,5 @@ void dm_motion_clear(int player) {
+ void dm_haptics_apple_init(void) {}
++void mtl_set_bar_image(CGImageRef img) { (void)img; }   // nvn_mtl.m: the picture's bars and shape (front_ios.m bar_fill_set)
++void mtl_set_bar_mode(int mode) { (void)mode; }
++void mtl_set_picture_stretch(int on) { (void)on; }
+ void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index db21b049..0f8f5338 100644
+index fed88b1f..efe4b3ea 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -210,3 +210,3 @@ DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the mo
+@@ -211,3 +211,3 @@ DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the mo
  DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
 -DM_PICTURE_FIT	player	`fill` scales the 16:9 picture on the iPhone and iPad until it covers the screen in landscape and crops the edges (a portrait or tabletop split and a TV stay fitted); `fit` or unset, the largest 16:9 rectangle with black bars. Launcher and in-game menu setting
-+DM_PICTURE_FIT	player	`fill` scales the 16:9 picture on the iPhone and iPad until it covers the screen in landscape and crops the edges (a portrait or tabletop split and a TV stay fitted); `fit`, the largest 16:9 rectangle with black bars; `blur` (the default) is `fit` with the bars filled by a dimmed, blurred copy of the picture (the game view is the whole screen and the present draws it, `bar_blur_m4` in `nvn_mtl.m`, also through MetalFX); `image` is `fit` with the bars filled by `bar_background.jpg` from the app, covering the canvas. Launcher and in-game menu setting
++DM_PICTURE_FIT	player	`fill` scales the 16:9 picture on the iPhone and iPad until it covers the screen in landscape and crops the edges (a portrait or tabletop split and a TV stay fitted); `fit`, the largest 16:9 rectangle with black bars; `blur` (the default) is `fit` with the bars filled by a dimmed, blurred copy of the picture (the game view is the whole screen and the present draws it, `bar_blur_m4` in `nvn_mtl.m`, also through MetalFX); `image` is `fit` with the bars filled by `bar_background.jpg` from the app, covering the canvas; `stretch` stretches the picture over the whole screen, changing its shape (landscape, one screen; a portrait or tabletop split stays fitted). Launcher and in-game menu setting
  DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC
 diff --git a/docs/settings.md b/docs/settings.md
-index 7983ed41..8b9e9a9a 100644
+index 7983ed41..3ee9f04c 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
 @@ -19,3 +19,3 @@ When you change a setting and tap **Play**, the app keeps your choice, also when
@@ -4959,7 +4980,7 @@ index 7983ed41..8b9e9a9a 100644
 -iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the taller one of [Picture shape](#picture-shape)) as large as it fits, with black bars where the screen has another shape. **Fill** enlarges it until it covers the whole screen and crops what lies outside; nothing is stretched. An iPhone loses some of the top and bottom, an iPad some of each side, so health bars, subtitles or maps near the edges can be cut off. A picture that fills the screen without cropping needs a patch for each game that renders a wider view. Fill applies in landscape; in portrait the picture stays fitted above the controls, and on a TV it is always fitted.
 +iPhone and iPad. **Fit** shows the game's picture (16:9, or the taller one of [Picture shape](#picture-shape)) as large as it fits, with black bars where the screen has another shape. **Fill** enlarges it until it covers the whole screen and crops what lies outside; nothing is stretched. An iPhone loses some of the top and bottom, an iPad some of each side, so health bars, subtitles or maps near the edges can be cut off. A picture that fills the screen without cropping needs a patch for each game that renders a wider view. Fill applies in landscape; in portrait the picture stays fitted above the controls, and on a TV it is always fitted.
 +
-+**Fit with blurred bars** (the default) and **Fit with still-image bars** show the same picture, but fill the bars where the screen has another shape (a phone screen that is not 16:9: the iPhone's 19.5:9, the iPhone Duo's about 10:7). The blurred bars are a dimmed, blurred copy of the picture, so the screen looks full and the colours follow the game; it also works with **Upscaling** set to **MetalFX**, where the upscaled picture is what is blurred, and costs a little GPU time (three small passes and a full-screen draw a frame, only while there are bars). The still image is a fixed dark pattern (`dm/ios/Sources/bar_background.jpg`, scaled to cover the screen from its middle) and costs no GPU time beyond a texture read. The picture itself is never stretched or cropped, and the on-screen controls stay where they were. In a portrait or tabletop split the bars stay black, and screenshots taken from inside the app show black bars. The in-game menu changes the choice while the game runs.
++**Fit with blurred bars** (the default) and **Fit with still-image bars** show the same picture, but fill the bars where the screen has another shape (a phone screen that is not 16:9: the iPhone's 19.5:9, the iPhone Duo's about 10:7). The blurred bars are a dimmed, blurred copy of the picture, so the screen looks full and the colours follow the game; it also works with **Upscaling** set to **MetalFX**, where the upscaled picture is what is blurred, and costs a little GPU time (three small passes and a full-screen draw a frame, only while there are bars). The still image is a fixed dark pattern (`dm/ios/Sources/bar_background.jpg`, scaled to cover the screen from its middle) and costs no GPU time beyond a texture read. The picture itself is never stretched or cropped, and the on-screen controls stay where they were. **Stretch** fills the whole screen without bars or cropping by changing the picture's shape: everything looks wider (on a 19.5:9 iPhone) or taller than it is, and touches follow the stretched picture. In a portrait or tabletop split Stretch, like Fill, keeps the picture fitted and the bars stay black, and screenshots taken from inside the app show black bars. The in-game menu changes the choice while the game runs.
  
 @@ -211,3 +213,3 @@ Sets every setting back to the game's tested default; **Play** then forgets your
  
@@ -4969,5 +4990,5 @@ index 7983ed41..8b9e9a9a 100644
 @@ -257,3 +259,3 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
  | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 -| Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
-+| Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `blur` or `image` (the default is `blur`): `fit` with the bars filled, `fill` covers the screen, cropped |
++| Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `blur` or `image` (the default is `blur`): `fit` with the bars filled, `fill` covers the screen, cropped, `stretch` fills the screen, changing the picture's shape |
  | Picture shape | `DM_SCREEN_ASPECT` | `1.43` the iPhone Duo's shape, `0` 16:9 |
