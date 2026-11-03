@@ -1,3 +1,2 @@
 0001-blurred-bars.patch
 0002-control-editor.patch
-0003-duo-portrait.patch
