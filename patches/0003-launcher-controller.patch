@@ -1,0 +1,285 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: klave7 <5594473+klave7@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 -0600
+Subject: [PATCH] Launcher: a game controller moves around the settings screen and plays
+---
+diff --git a/dm/ios/Sources/Launcher.swift b/dm/ios/Sources/Launcher.swift
+index 517e5935..97569674 100644
+--- a/dm/ios/Sources/Launcher.swift
++++ b/dm/ios/Sources/Launcher.swift
+@@ -97,4 +97,12 @@ private struct LauncherView: View {
+     let play: () -> Void
++    @StateObject private var pad: LauncherPad   // a game controller moves around the screen (LauncherPad.swift)
+     @State private var memory = os_proc_available_memory()
+ 
++    init(m: LauncherModel, play: @escaping () -> Void) {
++        self.m = m; self.play = play
++        _pad = StateObject(wrappedValue: LauncherPad(model: m, play: play))
++    }
++
++    private func focused(_ id: String) -> Bool { pad.active && pad.focus == id }
++
+     var body: some View {
+@@ -113,2 +121,7 @@ private struct LauncherView: View {
+                     playButton
++                        .overlay(Capsule().stroke(.white, lineWidth: 3).padding(-5).opacity(focused(LauncherPad.play) ? 1 : 0))
++                    if pad.connected {
++                        Text("Controller: D-pad moves, left and right change, A selects, + plays")
++                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
++                    }
+                 }
+@@ -116,2 +129,3 @@ private struct LauncherView: View {
+                 .frame(width: geometry.size.width / 3, height: geometry.size.height)
++                ScrollViewReader { proxy in
+                 List {
+@@ -121,3 +135,6 @@ private struct LauncherView: View {
+                             Section(section) {
+-                                ForEach(rows) { SettingRow(s: $0, m: m) }
++                                ForEach(rows) { row in
++                                    SettingRow(s: row, m: m).id(row.env)
++                                        .listRowBackground(focused(row.env) ? Color.accentColor.opacity(0.4) : Color(uiColor: .secondarySystemGroupedBackground))
++                                }
+                             }
+@@ -127,3 +144,4 @@ private struct LauncherView: View {
+                         Button("Reset to tested defaults") { m.reset() }
+-                            .disabled(!m.changed)
++                            .disabled(!m.changed).id(LauncherPad.reset)
++                            .listRowBackground(focused(LauncherPad.reset) ? Color.accentColor.opacity(0.4) : Color(uiColor: .secondarySystemGroupedBackground))
+                     } footer: {
+@@ -142,2 +160,4 @@ private struct LauncherView: View {
+                 .contentMargins(.horizontal, 12, for: .scrollContent)
++                .onChange(of: pad.focus) { _, id in if pad.active { withAnimation { proxy.scrollTo(id, anchor: .center) } } }
++                }
+                 .frame(width: geometry.size.width * 2 / 3)
+@@ -155,3 +175,3 @@ private struct LauncherView: View {
+     @ViewBuilder var playButton: some View {
+-        let button = Button(action: play) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large)
++        let button = Button(action: pad.launch) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large)
+         if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
+diff --git a/dm/ios/Sources/LauncherPad.swift b/dm/ios/Sources/LauncherPad.swift
+new file mode 100644
+index 00000000..1d8e1cc0
+--- /dev/null
++++ b/dm/ios/Sources/LauncherPad.swift
+@@ -0,0 +1,125 @@
++// A game controller drives the iOS launcher (Launcher.swift) before the game starts: the D-pad or left stick moves a highlight over Play, the settings and Reset, left / right change the
++// highlighted setting (a choice steps through its options, a range by its step, a toggle flips), the bottom face button (A on an Xbox pad, B on a Switch one) presses Play or Reset, flips
++// a toggle or steps a choice, and the menu button (+ / Start) plays. The touch screen works as before. The game's own input (DmGamepad.m) takes the controllers over when it starts:
++// stop() clears the handlers this one set, before the launcher is dismissed, and a handler of this class does nothing once it is stopped.
++import Foundation
++import Combine
++import GameController
++
++enum PadDir { case up, down, left, right }
++
++final class LauncherPad: ObservableObject {
++    static let play = "play", reset = "reset"   // the ids of the two items that are not settings; a setting's id is its variable name
++
++    @Published private(set) var focus = LauncherPad.play
++    @Published private(set) var active = false      // a controller has moved the highlight: it is drawn from then on
++    @Published private(set) var connected = false   // a controller with an extended profile is attached: the hint under Play is shown
++
++    private let model: LauncherModel
++    private let onPlay: () -> Void
++    private var running = true
++    private var holding: PadDir?
++    private var repeater: Timer?
++    private var confirmDown = false, menuDown = false
++    private var observers: [NSObjectProtocol] = []
++
++    init(model: LauncherModel, play: @escaping () -> Void) {
++        self.model = model; onPlay = play
++        let nc = NotificationCenter.default
++        for n in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
++            observers.append(nc.addObserver(forName: n, object: nil, queue: .main) { [weak self] _ in self?.attach() })
++        }
++        attach()
++    }
++
++    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
++
++    // Play, from the touch button or a controller: the controllers go back to the game's own input first
++    func launch() { stop(); onPlay() }
++
++    // Before the game starts: the launcher is going away, and DmGamepad.m sets its own handlers next
++    func stop() {
++        running = false; repeater?.invalidate(); repeater = nil; holding = nil
++        for c in GCController.controllers() { c.extendedGamepad?.valueChangedHandler = nil }
++    }
++
++    private func attach() {
++        guard running else { return }
++        let pads = GCController.controllers().compactMap { $0.extendedGamepad }
++        connected = !pads.isEmpty
++        for p in pads { p.valueChangedHandler = { [weak self] pad, _ in self?.read(pad) } }
++    }
++
++    // The items the highlight visits, top to bottom: Play, each setting a controller can change (not one an env file or the launch fixed), Reset while it has something to do
++    var items: [String] {
++        var ids = [LauncherPad.play]
++        for s in model.sections { for r in model.rows(in: s) where !model.fixed.contains(r.env) { ids.append(r.env) } }
++        if model.changed { ids.append(LauncherPad.reset) }
++        return ids
++    }
++
++    private func read(_ g: GCExtendedGamepad) {
++        guard running else { return }
++        let x = g.leftThumbstick.xAxis.value, y = g.leftThumbstick.yAxis.value
++        let dir: PadDir? = g.dpad.up.isPressed || y > 0.6 ? .up : g.dpad.down.isPressed || y < -0.6 ? .down
++            : g.dpad.left.isPressed || x < -0.6 ? .left : g.dpad.right.isPressed || x > 0.6 ? .right : nil
++        if dir != holding {
++            repeater?.invalidate(); repeater = nil; holding = dir
++            if let d = dir {   // a held direction repeats after a pause, so a slider or a long list can be crossed
++                press(d)
++                repeater = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
++                    guard let self = self, self.running, let h = self.holding else { return }
++                    self.repeater = Timer.scheduledTimer(withTimeInterval: 0.11, repeats: true) { [weak self] _ in
++                        guard let self = self, self.running, let h = self.holding else { return }
++                        self.press(h)
++                    }
++                    self.press(h)
++                }
++            }
++        }
++        if g.buttonA.isPressed != confirmDown { confirmDown = g.buttonA.isPressed; if confirmDown { confirm() } }
++        if g.buttonMenu.isPressed != menuDown { menuDown = g.buttonMenu.isPressed; if menuDown { active = true; launch() } }
++    }
++
++    // One step of the D-pad (also what the tests call)
++    func press(_ d: PadDir) {
++        active = true
++        let ids = items
++        guard let i = ids.firstIndex(of: focus) else { focus = LauncherPad.play; return }   // the highlighted row went away (a sub-setting)
++        switch d {
++        case .up: focus = ids[max(i - 1, 0)]
++        case .down: focus = ids[min(i + 1, ids.count - 1)]
++        case .left: change(-1)
++        case .right: change(1)
++        }
++    }
++
++    // The bottom face button: Play and Reset press, a toggle flips, a choice steps to the next option (a range is moved with left and right)
++    func confirm() {
++        active = true
++        switch focus {
++        case LauncherPad.play: launch()
++        case LauncherPad.reset: model.reset(); if !items.contains(focus) { focus = LauncherPad.play }
++        default: if let s = model.settings.first(where: { $0.env == focus }), s.kind != "range" { change(1) }
++        }
++    }
++
++    // The highlighted setting one step down (-1) or up (+1): the value is written as the screen's own control writes it (LauncherRow.swift)
++    private func change(_ step: Int) {
++        guard let s = model.settings.first(where: { $0.env == focus }), !model.fixed.contains(s.env) else { return }
++        let now = model.values[s.env] ?? s.def
++        switch s.kind {
++        case "choice":
++            guard let o = s.options, !o.isEmpty else { return }
++            let i = o.firstIndex { $0[0] == now } ?? 0
++            model.values[s.env] = o[(i + step + o.count) % o.count][0]
++        case "range":
++            let lo = s.min ?? 0, hi = s.max ?? 1, st = s.step ?? 0.05
++            let v = (Double(now) ?? hi) + Double(step) * st
++            model.values[s.env] = String(format: "%.2f", Swift.min(hi, Swift.max(lo, v)))
++        default:
++            model.values[s.env] = now == s.onValue ? s.offValue : s.onValue
++        }
++        objectWillChange.send()
++    }
++}
+diff --git a/dm/ios/tests/launcher_pad_check.swift b/dm/ios/tests/launcher_pad_check.swift
+new file mode 100644
+index 00000000..e6aab9c0
+--- /dev/null
++++ b/dm/ios/tests/launcher_pad_check.swift
+@@ -0,0 +1,48 @@
++// The launcher's controller navigation (LauncherPad.swift), run by test_launcher_pad.py on macOS: the highlight visits Play, the settings a player can change and Reset; left / right and the
++// face button change a choice, a range or a toggle as the screen's own controls do; a row that went away or an env file's value is skipped; Play and the menu button start the game once.
++import Foundation
++@main struct Check {
++    static func main() {
++        var fails = 0
++        func check(_ c: Bool, _ m: String) { print((c ? "PASS " : "FAIL ") + m); if !c { fails += 1 } }
++        let suite = "nxnative.launcher-pad-test." + UUID().uuidString
++        let json = """
++        {"settings":[
++         {"env":"A_FPS","kind":"choice","label":"fps","note":"","default":"30","section":"Game","options":[["30","30"],["60","60"]]},
++         {"env":"B_SCALE","kind":"range","label":"scale","note":"","default":"1.0","section":"Game","min":0.5,"max":1.0,"step":0.05},
++         {"env":"C_TOG","kind":"toggle","label":"t","note":"","default":"1","section":"Controls"},
++         {"env":"D_SUB","kind":"range","label":"sub","note":"","default":"1.0","section":"Controls","needs":"C_TOG=1","min":0,"max":3,"step":0.1},
++         {"env":"E_FIXED","kind":"toggle","label":"f","note":"","default":"0","section":"Controls"}
++        ]}
++        """
++        let file = try! JSONDecoder().decode(SettingsFile.self, from: json.data(using: .utf8)!)
++        setenv("DM_ENV_FILE_KEYS", "E_FIXED", 1); setenv("E_FIXED", "0", 1)
++        let m = LauncherModel(file.settings, defaults: UserDefaults(suiteName: suite)!)
++        var played = 0
++        let pad = LauncherPad(model: m) { played += 1 }
++        check(pad.items == ["play","A_FPS","B_SCALE","C_TOG","D_SUB"], "items: play, settings, fixed one skipped, no Reset yet: \(pad.items)")
++        pad.press(.up); check(pad.focus == "play" && pad.active, "up at the top stays on Play")
++        pad.press(.down); pad.press(.down); check(pad.focus == "B_SCALE", "down twice reaches the range")
++        pad.press(.left); check(m.values["B_SCALE"] == "0.95", "left lowers the range by its step: \(m.values["B_SCALE"] ?? "")")
++        for _ in 0..<20 { pad.press(.left) }; check(m.values["B_SCALE"] == "0.50", "the range stops at its minimum")
++        check(pad.items.last == "reset", "Reset appears once something changed")
++        pad.press(.up); check(pad.focus == "A_FPS", "up to the choice")
++        pad.press(.right); check(m.values["A_FPS"] == "60", "right steps the choice")
++        pad.press(.right); check(m.values["A_FPS"] == "30", "and wraps")
++        pad.confirm(); check(m.values["A_FPS"] == "60", "A steps a choice")
++        pad.press(.down); pad.press(.down); check(pad.focus == "C_TOG", "to the toggle")
++        pad.confirm(); check(m.values["C_TOG"] == "0", "A flips a toggle")
++        check(!pad.items.contains("D_SUB"), "the sub-setting is hidden while its toggle is off")
++        pad.press(.down); check(pad.focus == "reset", "next is Reset: \(pad.focus)")
++        pad.confirm(); check(m.values["A_FPS"] == "30" && m.values["B_SCALE"] == "1.0" || m.values["B_SCALE"] == "1.00", "A on Reset restores the defaults")
++        check(pad.focus == "play", "with nothing left to reset the highlight returns to Play: \(pad.focus)")
++        pad.press(.down); pad.press(.down); pad.press(.down)
++        pad.press(.down); pad.press(.down); pad.press(.down)
++        check(pad.focus == "D_SUB", "bottom of the list is the last setting: \(pad.focus)")
++        m.values["C_TOG"] = "0"; pad.press(.down); check(pad.focus == "play", "a highlighted row that disappeared falls back to Play")
++        pad.confirm(); check(played == 1, "A on Play plays once")
++        pad.launch(); check(played == 2, "launch() plays")
++        print("launcher pad: \(fails) failed")
++        exit(fails == 0 ? 0 : 1)
++    }
++}
+diff --git a/dm/ios/tests/test_launcher_pad.py b/dm/ios/tests/test_launcher_pad.py
+new file mode 100644
+index 00000000..615b291a
+--- /dev/null
++++ b/dm/ios/tests/test_launcher_pad.py
+@@ -0,0 +1,27 @@
++"""Compile and run the launcher's controller navigation on macOS; no simulator, controller or UI required."""
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++
++REPO = Path(__file__).resolve().parents[3]
++
++
++@unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcrun'), 'needs the macOS Swift toolchain')
++class LauncherPadTests(unittest.TestCase):
++    def test_navigation_changes_settings_as_the_screen_does(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            exe = Path(tmp) / 'launcher_pad_check'
++            c = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '5', '-parse-as-library', '-module-cache-path', str(Path(tmp) / 'module-cache'), '-o', str(exe),
++                                str(REPO / 'dm/ios/Sources/LauncherSettings.swift'), str(REPO / 'dm/ios/Sources/LauncherPad.swift'), str(Path(__file__).with_name('launcher_pad_check.swift'))],
++                               capture_output=True, text=True, timeout=300)
++            self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
++            r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60)
++            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
++            self.assertIn('launcher pad: 0 failed', r.stdout)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/docs/playing.md b/docs/playing.md
+index 6c10d899..4524bcda 100644
+--- a/docs/playing.md
++++ b/docs/playing.md
+@@ -16,2 +16,4 @@ A connected game controller hides the touch controls, all but the gear, and keep
+ 
++On the iPhone and iPad a connected controller also drives the settings screen before the game starts: the D-pad or left stick moves a highlight over **Play**, the settings and **Reset to tested defaults**, left and right change the highlighted setting (a choice steps through its options, a slider moves by its step, a switch flips), the bottom face button (A on an Xbox controller, B on a Switch one) presses Play or Reset, flips a switch or steps a choice, and the menu button (+ or Start) plays. The touch screen works as before, and the controller goes back to the game as soon as it starts.
++
+ In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).
