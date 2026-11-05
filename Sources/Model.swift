@@ -5,6 +5,7 @@
 // Every change is one of the fixed actions below, and each is put to the user first (ask).
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 let repoURL = "https://github.com/seedds/nxnative"
 let pipPackages = ["lz4", "capstone", "fonttools", "backports.zstd", "nsz"]
@@ -145,7 +146,7 @@ struct Updates {
     var subjects: [String] = []
 }
 
-/// A subfolder of the games folder that holds game files (NSP, NSZ, XCI, XCZ).
+/// A subfolder of the games folder that holds game files (NSP, NSZ, XCI, XCZ, or a Switch 2 game's NUP).
 struct FoundGame: Identifiable {
     var id: String { path }
     let path, folder: String
@@ -499,7 +500,7 @@ final class AppModel: ObservableObject {
 
     func useCompatible() async {
         guard let c = compat else { return }
-        guard await ask("Use Seedds' version from \(c.date)?", "This takes your applied patches off, then sets the local copy to Seedds' commit \(c.sha.prefix(7)) (\(c.behind) commit(s) older than the newest), where all three patches fit. Apply the patches again afterwards. Update to latest returns to the newest.",
+        guard await ask("Use Seedds' version from \(c.date)?", "This takes your applied patches off, then sets the local copy to Seedds' commit \(c.sha.prefix(7)) (\(c.behind) commit(s) older than the newest), where all the patches fit. Apply the patches again afterwards. Update to latest returns to the newest.",
                         command: "git reset --hard \(c.sha.prefix(7))", ok: "Use it") else { return }
         await work("Going back to a version the patches fit") {
             for p in patches.reversed() where p.state == .applied { _ = await stream(["git", "apply", "-R"] + undoArgs(p.path) + [p.path], cwd: repoDir) }
@@ -735,9 +736,10 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: queue
-    func pick(folder: Bool, title: String, start: String? = nil) -> String? {
+    func pick(folder: Bool, title: String, start: String? = nil, ext: String? = nil) -> String? {
         let panel = NSOpenPanel()
         panel.message = title
+        if let e = ext, let t = UTType(filenameExtension: e) { panel.allowedContentTypes = [t] }
         panel.canChooseDirectories = folder; panel.canChooseFiles = !folder; panel.canCreateDirectories = folder
         panel.allowsMultipleSelection = false
         if let s = start, !s.isEmpty { panel.directoryURL = URL(fileURLWithPath: s) }
@@ -747,7 +749,7 @@ final class AppModel: ObservableObject {
     func add() {
         let name = newName.trimmingCharacters(in: .whitespaces)
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: newFolder, isDirectory: &isDir), isDir.boolValue else { message = "Pick the folder that holds the NSP files."; return }
+        guard FileManager.default.fileExists(atPath: newFolder, isDirectory: &isDir), isDir.boolValue || AppModel.isNup(newFolder) else { message = "Pick the folder that holds the NSP files, or a Switch 2 game's .nup file."; return }
         guard !name.isEmpty else { message = "Enter the game's name."; return }
         jobs.append(Job(id: nextId, folder: newFolder, name: name)); nextId += 1
         newFolder = ""; newName = ""; message = ""; save()
@@ -767,7 +769,7 @@ final class AppModel: ObservableObject {
     nonisolated static func scan(_ gamesFolder: String) -> [FoundGame] {
         var out: [FoundGame] = []
         guard let subs = try? FileManager.default.contentsOfDirectory(atPath: gamesFolder) else { return out }
-        let exts: Set<String> = ["nsp", "nsz", "xci", "xcz"]
+        let exts = gameExts
         for n in subs.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) where !n.hasPrefix(".") {
             let p = gamesFolder + "/" + n
             var isDir: ObjCBool = false
@@ -776,6 +778,22 @@ final class AppModel: ObservableObject {
             if count > 0 { out.append(FoundGame(path: p, folder: n, files: count)) }
         }
         return out
+    }
+    /// File types a game folder holds: Switch NSP / NSZ / XCI / XCZ, or one Switch 2 NUP (a .nup file, one container with the base game, its updates and DLC).
+    nonisolated static let gameExts: Set<String> = ["nsp", "nsz", "xci", "xcz", "nup"]
+    nonisolated static let keyedExts: Set<String> = ["nsp", "nsz", "xci", "xcz"]   // the ones whose files need prod.keys; a NUP does not
+    nonisolated static func isNup(_ path: String) -> Bool { (path as NSString).pathExtension.lowercased() == "nup" }
+    /// The game's files of a queue item (a folder, or a .nup file itself), and the folder they are in: a file item is its own one-file list.
+    nonisolated static func gameFiles(_ item: String) -> (dir: String, names: [String]) {
+        if isNup(item) { return ((item as NSString).deletingLastPathComponent, [(item as NSString).lastPathComponent]) }
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: item)) ?? []).filter { !$0.hasPrefix(".") && gameExts.contains(($0 as NSString).pathExtension.lowercased()) }
+        return (item, names)
+    }
+    /// Whether building the item needs prod.keys: not for a NUP (a Switch 2 game; the build script reads it without keys) unless NSP / XCI files lie beside it.
+    nonisolated static func needsKeys(_ item: String) -> Bool {
+        if isNup(item) { return false }
+        let names = gameFiles(item).names
+        return names.isEmpty || names.contains { keyedExts.contains(($0 as NSString).pathExtension.lowercased()) }
     }
     func isQueued(_ g: FoundGame) -> Bool { jobs.contains { $0.folder == g.path } }
     func addFound(_ g: FoundGame) {
@@ -881,7 +899,8 @@ final class AppModel: ObservableObject {
     func releaseActivity() { if let a = activity { ProcessInfo.processInfo.endActivity(a); activity = nil } }
 
     func runQueue() async {
-        guard FileManager.default.fileExists(atPath: keys) else { message = "Set the path of prod.keys."; return }
+        let todo = jobs.filter { ["waiting", "failed", "stopped"].contains($0.status) }
+        guard !todo.contains(where: { AppModel.needsKeys($0.folder) }) || FileManager.default.fileExists(atPath: keys) else { message = "Set the path of prod.keys."; return }
         guard !out.isEmpty else { message = "Choose the output folder for the IPA files."; return }
         guard setupDone else { message = "Finish the setup first."; return }
         guard repoReady else { message = "Download Seedds nxnative first."; return }
@@ -917,9 +936,9 @@ final class AppModel: ObservableObject {
         let fm = FileManager.default
         guard !out.isEmpty else { return ("failed", "Failed: no output folder is set.") }
         let cached = localCache && !AppModel.onLocalVolume(job.folder)
-        let exts: Set<String> = ["nsp", "nsz", "xci", "xcz"]
-        let names = ((try? fm.contentsOfDirectory(atPath: job.folder)) ?? []).filter { exts.contains(($0 as NSString).pathExtension.lowercased()) }
-        let total = names.reduce(0) { $0 + (((try? fm.attributesOfItem(atPath: job.folder + "/" + $1))?[.size] as? Int) ?? 0) }
+        let (jobDir, names) = AppModel.gameFiles(job.folder)   // a queue item is a game folder or a Switch 2 game's .nup file
+        let needsKeys = AppModel.needsKeys(job.folder)
+        let total = names.reduce(0) { $0 + (((try? fm.attributesOfItem(atPath: jobDir + "/" + $1))?[.size] as? Int) ?? 0) }
         // FlareStore refuses an IPA with an entry over 4 GiB ("out of range integral type conversion attempted"), and the game files are one entry: above that size they stay out of the IPA (--romfs separate)
         // and go on the phone once as Documents/romfs.img, which no installer limits.
         let separate = bigSeparate && total > 4 << 30
@@ -928,11 +947,11 @@ final class AppModel: ObservableObject {
             work = workRoot + "/job-\(job.id)"
             try? fm.createDirectory(atPath: workRoot, withIntermediateDirectories: true)
             let free = (try? URL(fileURLWithPath: workRoot).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage).flatMap { $0 } ?? Int64.max
-            if names.isEmpty { return ("failed", "Failed: no NSP, NSZ or XCI files in the folder.") }
+            if names.isEmpty { return ("failed", "Failed: no NSP, NSZ, XCI or NUP files in the folder.") }
             if free < Int64(total) * 2 { return ("failed", String(format: "Failed: the local work folder needs about %.0f GB free (the game is %.0f GB) and has %.0f GB.", Double(total) * 2 / 1e9, Double(total) / 1e9, Double(free) / 1e9)) }
             say(String(format: "Copying %d file(s), %.1f GB, from %@ to the local work folder %@ …\n", names.count, Double(total) / 1e9, job.folder, work))
             _ = await stream(["/bin/rm", "-rf", work]); try? fm.createDirectory(atPath: work + "/out", withIntermediateDirectories: true)
-            let rc = await stream(["/usr/bin/rsync", "-a", "--progress"] + names.map { job.folder + "/" + $0 } + [work + "/"])
+            let rc = await stream(["/usr/bin/rsync", "-a", "--progress"] + names.map { jobDir + "/" + $0 } + [work + "/"])
             if rc != 0 || stopFlag {
                 _ = await stream(["/bin/rm", "-rf", work])
                 return stopFlag ? ("stopped", nil) : ("failed", "Failed: copying the game files to the local work folder did not finish (rsync exit \(rc)).")
@@ -944,12 +963,12 @@ final class AppModel: ObservableObject {
         // stays in the game's folder with its IPA and index (a repack of the game reuses them), and the output gets a copy.
         var stage = ""
         if !cached {
-            stage = cleanup ? out + "/.nxb-build-\(job.id)" : job.folder + "/.nxb-ipa"
+            stage = cleanup ? out + "/.nxb-build-\(job.id)" : jobDir + "/.nxb-ipa"
             if cleanup { _ = await stream(["/bin/rm", "-rf", stage]) }
             try? fm.createDirectory(atPath: stage, withIntermediateDirectories: true)
             target = stage + "/" + safe + ".ipa"
         }
-        let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", folder, "-k", keys, "--app-name", job.name, "-o", target, "--progress", "lines"] + (separate ? ["--romfs", "separate"] : cleanup || cached ? ["--no-keep-extracted"] : [])
+        let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", folder] + (needsKeys ? ["-k", keys] : []) + ["--app-name", job.name, "-o", target, "--progress", "lines"] + (separate ? ["--romfs", "separate"] : cleanup || cached ? ["--no-keep-extracted"] : [])
         let rc = await stream(cmd, cwd: repoDir)
         var status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
         var why = status == "failed" ? failureReason(streamText) : status == "done" ? successNote(streamText).map { "Success: " + $0 + "." } : nil
@@ -986,7 +1005,7 @@ final class AppModel: ObservableObject {
             }
         }
         if cached { if !keep { say("Deleting the local work folder \(work) …\n"); _ = await stream(["/bin/rm", "-rf", work]) } }
-        else if cleanup { if !keep { _ = await stream(["/bin/rm", "-rf", stage]) }; clean(folder: job.folder, ipa: ipa, since: started, built: status == "done") }
+        else if cleanup { if !keep { _ = await stream(["/bin/rm", "-rf", stage]) }; clean(folder: jobDir, ipa: ipa, since: started, built: status == "done") }
         return (status, why)
     }
 

@@ -230,7 +230,7 @@ struct PatchesSection: View {
                         Divider()
                     }
                     Text("A patch does not fit Seedds' newest code.").bold().foregroundColor(.orange)
-                    Text("The app can look back through Seedds' recent versions for the newest one where all three patches fit, and use that until the patches are updated.").font(.caption).foregroundColor(.secondary)
+                    Text("The app can look back through Seedds' recent versions for the newest one where all the patches fit, and use that until the patches are updated.").font(.caption).foregroundColor(.secondary)
                     HStack {
                         Button("Find the newest version the patches fit…") { Task { await m.findCompatible() } }.disabled(!m.busy.isEmpty)
                         if let c = m.compat {
@@ -262,15 +262,22 @@ struct QueueSection: View {
             }
             if !m.gamesFolder.isEmpty {
                 HStack {
-                    Text(m.scanning ? "Scanning the games folder…" : !m.scanned ? "Press Rescan to list the game folders." : m.found.isEmpty ? "No subfolders with game files (NSP, NSZ, XCI, XCZ) found." : "\(m.found.count) game folder(s) found. Name each one and add it to the queue.").font(.caption).foregroundColor(.secondary)
+                    Text(m.scanning ? "Scanning the games folder…" : !m.scanned ? "Press Rescan to list the game folders." : m.found.isEmpty ? "No subfolders with game files (NSP, NSZ, XCI, XCZ or NUP) found." : "\(m.found.count) game folder(s) found. Name each one and add it to the queue.").font(.caption).foregroundColor(.secondary)
                     Spacer()
                     Button("Rescan") { m.scanGames() }
                 }
                 ForEach(m.found) { g in FoundRow(g: g) }
             }
             Divider()
-            pathRow("NSP folder", $m.newFolder, "folder with the game / update / DLC NSP files") {
-                if let p = m.pick(folder: true, title: "Folder with the game / update / DLC NSP files") { m.newFolder = p; if m.newName.isEmpty { m.newName = (p as NSString).lastPathComponent } }
+            HStack {
+                Text("Game").frame(width: 80, alignment: .leading).foregroundColor(.secondary)
+                TextField("folder with the game / update / DLC NSP files, or a Switch 2 game's .nup file", text: $m.newFolder).textFieldStyle(.roundedBorder)
+                Button("Folder…") {
+                    if let p = m.pick(folder: true, title: "Folder with the game / update / DLC NSP files (or one .nup file)") { m.newFolder = p; if m.newName.isEmpty { m.newName = (p as NSString).lastPathComponent } }
+                }
+                Button("NUP file…") {
+                    if let p = m.pick(folder: false, title: "A Switch 2 game's .nup file (no prod.keys needed)", ext: "nup") { m.newFolder = p; if m.newName.isEmpty { m.newName = ((p as NSString).lastPathComponent as NSString).deletingPathExtension } }
+                }
             }
             HStack {
                 Text("Game name").frame(width: 80, alignment: .leading).foregroundColor(.secondary)

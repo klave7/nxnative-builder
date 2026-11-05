@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds "NxNative Builder.app" (universal: Apple silicon and Intel) next to this script. Needs Xcode's swiftc. The app is native SwiftUI; it contains the three patches,
+# Builds "NxNative Builder.app" (universal: Apple silicon and Intel) next to this script. Needs Xcode's swiftc. The app is native SwiftUI; it contains the patches,
 # and downloads everything else it needs on first run after asking. Signed ad-hoc: on another Mac, right-click the app and choose Open the first time (it is not notarized).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -20,7 +20,7 @@ cat > "$APP/Contents/Info.plist" <<P
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleExecutable</key><string>NxNativeBuilder</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>27</string><key>CFBundleShortVersionString</key><string>2.12.0</string>
+<key>CFBundleVersion</key><string>28</string><key>CFBundleShortVersionString</key><string>2.13.0</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
