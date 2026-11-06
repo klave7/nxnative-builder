@@ -296,6 +296,12 @@ struct QueueSection: View {
                     Spacer()
                     Text(j.status).foregroundColor(color(j.status)).frame(width: 70, alignment: .leading)
                     if j.status != "running" {
+                        if let ic = j.icon {
+                            Text((ic as NSString).lastPathComponent).font(.caption).foregroundColor(.secondary).lineLimit(1).truncationMode(.middle).frame(maxWidth: 120)
+                            Button { m.setIcon(j, nil) } label: { Image(systemName: "photo.badge.minus") }.help("Remove the cover art")
+                        } else {
+                            Button("Cover art…") { if let p = m.pick(folder: false, title: "A square image (1024 x 1024 or larger) for the app's icon; used where the game has no icon of its own, such as a Switch 2 NUP") { m.setIcon(j, p) } }
+                        }
                         Button { m.move(j, -1) } label: { Image(systemName: "arrow.up") }
                         Button { m.move(j, 1) } label: { Image(systemName: "arrow.down") }
                         Button { m.remove(j) } label: { Image(systemName: "xmark") }

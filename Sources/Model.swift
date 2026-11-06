@@ -128,6 +128,7 @@ struct Job: Identifiable, Codable {
     var folder, name: String
     var status = "waiting"
     var reason: String? = nil   // one sentence on why the last build failed
+    var icon: String? = nil     // cover art the user chose (DM_ICON): used where the game has no icon of its own (a NUP or a dump)
 }
 
 struct Config: Codable {
@@ -886,6 +887,7 @@ final class AppModel: ObservableObject {
         guard await ask("Clear the whole queue?", "Removes all \(jobs.count) game(s) from the queue. Nothing on disk is deleted.", ok: "Clear queue") else { return }
         jobs.removeAll(); save()
     }
+    func setIcon(_ j: Job, _ path: String?) { if let i = jobs.firstIndex(where: { $0.id == j.id }) { jobs[i].icon = path; save() } }
     func remove(_ j: Job) { jobs.removeAll { $0.id == j.id }; save() }
     func move(_ j: Job, _ d: Int) {
         guard let i = jobs.firstIndex(where: { $0.id == j.id }), jobs.indices.contains(i + d) else { return }
@@ -968,7 +970,9 @@ final class AppModel: ObservableObject {
             try? fm.createDirectory(atPath: stage, withIntermediateDirectories: true)
             target = stage + "/" + safe + ".ipa"
         }
-        let cmd = [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", folder] + (needsKeys ? ["-k", keys] : []) + ["--app-name", job.name, "-o", target, "--progress", "lines"] + (separate ? ["--romfs", "separate"] : cleanup || cached ? ["--no-keep-extracted"] : [])
+        let iconPath: String? = job.icon.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        if job.icon != nil && iconPath == nil { say("The cover art \(job.icon!) is missing; no icon is set.\n") }
+        let cmd = (iconPath.map { ["/usr/bin/env", "DM_ICON=" + $0] } ?? []) + [venvDir + "/bin/python", "-u", repoDir + "/scripts/build_ipa_from_nsp.py", folder] + (needsKeys ? ["-k", keys] : []) + ["--app-name", job.name, "-o", target, "--progress", "lines"] + (separate ? ["--romfs", "separate"] : cleanup || cached ? ["--no-keep-extracted"] : [])
         let rc = await stream(cmd, cwd: repoDir)
         var status = stopFlag ? "stopped" : rc == 0 ? "done" : "failed"
         var why = status == "failed" ? failureReason(streamText) : status == "done" ? successNote(streamText).map { "Success: " + $0 + "." } : nil
