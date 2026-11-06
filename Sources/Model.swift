@@ -8,7 +8,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 let repoURL = "https://github.com/seedds/nxnative"
-let pipPackages = ["lz4", "capstone", "fonttools", "backports.zstd", "nsz"]
+let pipPackages = ["lz4", "capstone", "fonttools", "zbic", "backports.zstd", "nsz"]
 let formulae: [(id: String, label: String, tool: String, why: String)] = [
     ("python@3.12", "Python 3.12", "python3.12", "runs the build script (its modules go into the app's own environment)"),
     ("xcodegen", "XcodeGen", "xcodegen", "makes the Xcode project the IPA is built from"),
@@ -384,7 +384,7 @@ final class AppModel: ObservableObject {
             items.append(SetupItem(id: "brew:" + f.id, label: f.label, why: f.why, how: "", command: "brew install " + f.id, ok: which(f.tool) != nil, deps: ["brew"]))
         }
         var venvOK = false
-        if FileManager.default.fileExists(atPath: venvDir + "/bin/python") { venvOK = capture([venvDir + "/bin/python", "-c", "import lz4.block,capstone,fontTools,backports.zstd"]).0 == 0 }
+        if FileManager.default.fileExists(atPath: venvDir + "/bin/python") { venvOK = capture([venvDir + "/bin/python", "-c", "import lz4.block,capstone,fontTools,zbic,backports.zstd"]).0 == 0 }
         items.append(SetupItem(id: "venv", label: "Python environment", why: "the build script's Python modules (" + pipPackages.joined(separator: ", ") + "), kept in the app's own folder", how: "",
                                command: "python3.12 -m venv '\(venvDir)' && pip install " + pipPackages.joined(separator: " "), ok: venvOK, deps: ["brew:python@3.12"]))
         let ok = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.ok) })
