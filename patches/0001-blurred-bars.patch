@@ -4,7 +4,7 @@ Date: Sat, 31 Oct 2026 12:00:00 -0600
 Subject: [PATCH] Picture setting: stretch, blurred or still-image bars around the picture
 ---
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index 821909c4..5a19d61a 100644
+index 75f5e622..fff15694 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
 @@ -22,7 +22,7 @@ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling
@@ -30,10 +30,10 @@ index 5bfdfeac..a29e3f28 100644
 +fragment float4 fs_blurv(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return blur9(t, s, in.uv, float2(0, 2.0 / t.get_height())); }
 +fragment float4 fs_dim(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return float4(t.sample(s, in.uv).rgb * 0.5, 1); }
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index eb8b266e..b4c56953 100644
+index 8bfc3f51..0c78e996 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
-@@ -520,7 +520,7 @@ void mtl_init(void) {
+@@ -590,7 +590,7 @@ void mtl_init(void) {
      g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
      if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
      for (int i = 0; i < 3; i++) {
@@ -42,7 +42,7 @@ index eb8b266e..b4c56953 100644
          if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
          res_add(g_present_uv[i]);
      }
-@@ -12919,6 +12919,7 @@ void mtl_exec(const uint8_t *p) {
+@@ -13682,6 +13682,7 @@ void mtl_exec(const uint8_t *p) {
  // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
  static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
  static id<MTLSamplerState> g_blit_samp;
@@ -50,7 +50,7 @@ index eb8b266e..b4c56953 100644
  static uint64_t g_present_n;
  uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
  void mtl_res_snapshot(mtl_res_count *out) {
-@@ -13269,6 +13270,10 @@ static void present_pipeline(MTLPixelFormat format) {
+@@ -14032,6 +14033,10 @@ static void present_pipeline(MTLPixelFormat format) {
          pd.colorAttachments[0].pixelFormat = format;
          g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
          if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
@@ -61,7 +61,7 @@ index eb8b266e..b4c56953 100644
          g_blit_fmt = format;
          MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
          g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
-@@ -13293,7 +13298,10 @@ static void present_pipeline(MTLPixelFormat format) {
+@@ -14056,7 +14061,10 @@ static void present_pipeline(MTLPixelFormat format) {
  // The rectangle of the canvas (dw x dh) the picture (pw x ph) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
  // differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
  // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
@@ -72,7 +72,7 @@ index eb8b266e..b4c56953 100644
      double s = fmin(dw / pw, dh / ph);
      MTLViewport vp = {floor((dw - pw * s) / 2), floor((dh - ph * s) / 2), round(pw * s), round(ph * s), 0, 1};
      if (fabs((dw / dh) / (pw / ph) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
-@@ -13570,6 +13578,78 @@ static int up_mfx_encode(NvShader *cs) {
+@@ -14333,6 +14341,78 @@ static int up_mfx_encode(NvShader *cs) {
                              (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
      return 1;
  }
@@ -151,7 +151,7 @@ index eb8b266e..b4c56953 100644
  // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
  // (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)
  static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], id<MTLBuffer> uvb, fx_state *fx) {
-@@ -13578,11 +13658,23 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -14341,11 +14421,23 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      double dw = dst.width, dh = dst.height;
      MTLViewport vp = present_fit(src, dw, dh);
      int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
@@ -176,7 +176,7 @@ index eb8b266e..b4c56953 100644
      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
      rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
      id<MTL4RenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-@@ -13591,11 +13683,14 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -14354,11 +14446,14 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
      [en setArgumentTable:g_present_args atStages:MTLRenderStageFragment];
      [g_present_args setTexture:tex.gpuResourceID atIndex:0];
      [g_present_args setSamplerState:g_blit_samp.gpuResourceID atIndex:0];
@@ -195,7 +195,7 @@ index eb8b266e..b4c56953 100644
      [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
      [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
      m4_end(en);
-@@ -13605,7 +13700,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -14368,7 +14463,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
  // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
  static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
      id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
@@ -4935,7 +4935,7 @@ literal 0
 HcmV?d00001
 
 diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
-index cddc2948..d65b8f82 100644
+index 8ebee3ca..21718949 100644
 --- a/dm/ios/Sources/front_ios.m
 +++ b/dm/ios/Sources/front_ios.m
 @@ -19,6 +19,9 @@
@@ -4962,7 +4962,7 @@ index cddc2948..d65b8f82 100644
  static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
  static void launcher_done(void) { [g_root startGame]; }
  @implementation DmRootVC
-@@ -154,7 +160,8 @@ - (void)startGame {
+@@ -164,7 +170,8 @@ - (void)startGame {
      if (self.fill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
      self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
      self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
@@ -4972,7 +4972,7 @@ index cddc2948..d65b8f82 100644
      [self.view addSubview:self.game];
      g_layer = (CAMetalLayer *)self.game.layer;
      if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
-@@ -187,7 +194,8 @@ - (void)viewDidLayoutSubviews {
+@@ -197,7 +204,8 @@ - (void)viewDidLayoutSubviews {
      UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
      BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
      DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
@@ -4982,7 +4982,7 @@ index cddc2948..d65b8f82 100644
      layout.topSafeOnly = duoPortrait;
      NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
                        (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];
-@@ -259,13 +267,25 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
+@@ -269,13 +277,25 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
      });
  }
  
@@ -5024,11 +5024,11 @@ index 84efd5df..caa3e3db 100644
  
  int front_ios_boot_ok(void) { return 1; }
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 71a18876..467ba28c 100644
+index a63ca6e9..547a813c 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -231,7 +231,7 @@ DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (de
- DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
+@@ -235,7 +235,7 @@ DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, inste
+ DM_PAD_PRESS_TO_JOIN	player	`1`: a controller is no player until one of its buttons is pressed, then it is the lowest player free, whatever its port, link or model, identical pads included (`front_mac.m`, `DmGamepad.m`, `pad_slots.h`); not with `DM_PAD_MERGE`. Launcher setting
  DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
  DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
 -DM_PICTURE_FIT	player	`fill` scales the 16:9 picture on the iPhone and iPad until it covers the screen in landscape and crops the edges (a portrait or tabletop split and a TV stay fitted); `fit` or unset, the largest 16:9 rectangle with black bars. Launcher and in-game menu setting
@@ -5037,7 +5037,7 @@ index 71a18876..467ba28c 100644
  DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path
  DM_PRESENT_FIFO	switch	`0` makes the display link take the newest queued frame each tick, as before; by default it shows frames in order, at most one tick behind
 diff --git a/docs/settings.md b/docs/settings.md
-index 69c3aca8..51a2b54d 100644
+index f2bf1ea4..758c70b1 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
 @@ -17,7 +17,7 @@ Each game comes with the settings it was tested with: its profile in this reposi
@@ -5060,7 +5060,7 @@ index 69c3aca8..51a2b54d 100644
  
  ### Picture shape
  
-@@ -211,7 +213,7 @@ Sets every setting back to the game's tested default; **Play** then forgets your
+@@ -215,7 +217,7 @@ Sets every setting back to the game's tested default; **Play** then forgets your
  
  ## The Mac settings window
  
@@ -5069,12 +5069,12 @@ index 69c3aca8..51a2b54d 100644
  
  Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing the window ends the app without the game. The app remembers your choices for that game, and a game started without the window, from a front end or with the window turned off, uses them too ([Saved choices](frontends.md#saved-choices)). A setting fixed by an `env.txt` or by the program that started the app is shown greyed out.
  
-@@ -257,7 +259,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
+@@ -261,7 +263,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
  | Game language | `DM_LANG` | a language code, such as `ja` |
  | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
  | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 -| Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 +| Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `blur` or `image` (the default is `blur`): `fit` with the bars filled, `fill` covers the screen, cropped, `stretch` fills the screen, changing the picture's shape |
- | Picture shape | `DM_SCREEN_ASPECT` | `1.43` the iPhone Duo's shape, `0` 16:9 |
+ | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
  | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
  | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
