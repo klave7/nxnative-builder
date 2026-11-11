@@ -4,13 +4,19 @@ Date: Thu, 5 Nov 2026 12:00:00 -0600
 Subject: [PATCH] Launcher: a game controller moves around the settings screen and plays
 ---
 diff --git a/dm/ios/Sources/Launcher.swift b/dm/ios/Sources/Launcher.swift
-index 517e5935..97569674 100644
+index 0f9d8b66..403fbfea 100644
 --- a/dm/ios/Sources/Launcher.swift
 +++ b/dm/ios/Sources/Launcher.swift
-@@ -97,4 +97,12 @@ private struct LauncherView: View {
+@@ -95,12 +95,20 @@ private struct DocumentPicker: UIViewControllerRepresentable {
+ private struct LauncherView: View {
+     @ObservedObject var m: LauncherModel
      let play: () -> Void
 +    @StateObject private var pad: LauncherPad   // a game controller moves around the screen (LauncherPad.swift)
      @State private var memory = os_proc_available_memory()
+     @State private var checking = false
+     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
+     @State private var report: SaveSyncReport?
+     @State private var asking: SaveSyncReport.Step?
  
 +    init(m: LauncherModel, play: @escaping () -> Void) {
 +        self.m = m; self.play = play
@@ -20,19 +26,26 @@ index 517e5935..97569674 100644
 +    private func focused(_ id: String) -> Bool { pad.active && pad.focus == id }
 +
      var body: some View {
-@@ -113,2 +121,7 @@ private struct LauncherView: View {
+         GeometryReader { geometry in
+             HStack(spacing: 0) {
+@@ -115,21 +123,32 @@ private struct LauncherView: View {
+                     Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
+                         .font(.callout).foregroundStyle(.secondary)
                      playButton
++                        .onAppear { pad.onPlay = { if !checking { start() } } }   // a controller's Play takes the same way as the touch button: the save check first
 +                        .overlay(Capsule().stroke(.white, lineWidth: 3).padding(-5).opacity(focused(LauncherPad.play) ? 1 : 0))
 +                    if pad.connected {
 +                        Text("Controller: D-pad moves, left and right change, A selects, + plays")
 +                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
 +                    }
                  }
-@@ -116,2 +129,3 @@ private struct LauncherView: View {
+                 .padding(16)
                  .frame(width: geometry.size.width / 3, height: geometry.size.height)
 +                ScrollViewReader { proxy in
                  List {
-@@ -121,3 +135,6 @@ private struct LauncherView: View {
+                     ForEach(m.sections, id: \.self) { section in
+                         let rows = m.rows(in: section)
+                         if !rows.isEmpty {
                              Section(section) {
 -                                ForEach(rows) { SettingRow(s: $0, m: m) }
 +                                ForEach(rows) { row in
@@ -40,25 +53,36 @@ index 517e5935..97569674 100644
 +                                        .listRowBackground(focused(row.env) ? Color.accentColor.opacity(0.4) : Color(uiColor: .secondarySystemGroupedBackground))
 +                                }
                              }
-@@ -127,3 +144,4 @@ private struct LauncherView: View {
+                         }
+                     }
+                     Section {
                          Button("Reset to tested defaults") { m.reset() }
 -                            .disabled(!m.changed)
 +                            .disabled(!m.changed).id(LauncherPad.reset)
 +                            .listRowBackground(focused(LauncherPad.reset) ? Color.accentColor.opacity(0.4) : Color(uiColor: .secondarySystemGroupedBackground))
                      } footer: {
-@@ -142,2 +160,4 @@ private struct LauncherView: View {
+                         Text("Brings back all settings this game was tested with.")
+                     }
+@@ -144,6 +163,8 @@ private struct LauncherView: View {
+                 }
+                 .listStyle(.insetGrouped)
                  .contentMargins(.horizontal, 12, for: .scrollContent)
 +                .onChange(of: pad.focus) { _, id in if pad.active { withAnimation { proxy.scrollTo(id, anchor: .center) } } }
 +                }
                  .frame(width: geometry.size.width * 2 / 3)
-@@ -155,3 +175,3 @@ private struct LauncherView: View {
-     @ViewBuilder var playButton: some View {
--        let button = Button(action: play) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large)
-+        let button = Button(action: pad.launch) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large)
-         if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
+             }
+         }
+@@ -217,6 +238,7 @@ private struct LauncherView: View {
+     private func go(_ choice: String?) {
+         asking = nil
+         if let choice { setenv("DM_SAVE_SYNC_CHOICE", choice, 1); fputs("launcher: DM_SAVE_SYNC_CHOICE=\(choice)\n", stderr) }
++        pad.stop()   // the controllers go back to the game's own input
+         play()
+     }
+ 
 diff --git a/dm/ios/Sources/LauncherPad.swift b/dm/ios/Sources/LauncherPad.swift
 new file mode 100644
-index 00000000..1d8e1cc0
+index 00000000..c34fe5b8
 --- /dev/null
 +++ b/dm/ios/Sources/LauncherPad.swift
 @@ -0,0 +1,125 @@
@@ -80,7 +104,7 @@ index 00000000..1d8e1cc0
 +    @Published private(set) var connected = false   // a controller with an extended profile is attached: the hint under Play is shown
 +
 +    private let model: LauncherModel
-+    private let onPlay: () -> Void
++    var onPlay: () -> Void   // the launcher sets it to its Play, which checks the saves first and then stops this pad (Launcher.go)
 +    private var running = true
 +    private var holding: PadDir?
 +    private var repeater: Timer?
@@ -98,8 +122,8 @@ index 00000000..1d8e1cc0
 +
 +    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
 +
-+    // Play, from the touch button or a controller: the controllers go back to the game's own input first
-+    func launch() { stop(); onPlay() }
++    // Play, from a controller (the touch button goes the same way in Launcher.swift)
++    func launch() { onPlay() }
 +
 +    // Before the game starts: the launcher is going away, and DmGamepad.m sets its own handlers next
 +    func stop() {
@@ -275,11 +299,15 @@ index 00000000..615b291a
 +if __name__ == '__main__':
 +    unittest.main()
 diff --git a/docs/playing.md b/docs/playing.md
-index 6c10d899..4524bcda 100644
+index ffb19c09..340852d2 100644
 --- a/docs/playing.md
 +++ b/docs/playing.md
-@@ -16,2 +16,4 @@ A connected game controller hides the touch controls, all but the gear, and keep
+@@ -14,6 +14,8 @@ In 3D, the right stick (the camera in most games) is not drawn: swipe on the rig
+ 
+ A connected game controller hides the touch controls, all but the gear, and keeps every button.
  
 +On the iPhone and iPad a connected controller also drives the settings screen before the game starts: the D-pad or left stick moves a highlight over **Play**, the settings and **Reset to tested defaults**, left and right change the highlighted setting (a choice steps through its options, a slider moves by its step, a switch flips), the bottom face button (A on an Xbox controller, B on a Switch one) presses Play or Reset, flips a switch or steps a choice, and the menu button (+ or Start) plays. The touch screen works as before, and the controller goes back to the game as soon as it starts.
 +
  In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).
+ 
+ ## Rumble
