@@ -824,10 +824,10 @@ index db5bfb59..0eeeafe2 100644
          self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
          s = mac['DM_FULLSCREEN']
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 9f9cba27..242c8ec2 100644
+index 6faff280..1f8262ee 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -272,6 +272,7 @@ DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads
+@@ -273,6 +273,7 @@ DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads
  DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
  DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
  DM_PAD_IDENTICAL	switch	`0` stops reading identical pads here when GameController lists fewer of their model than IOKit has, such as two Pro Controllers over USB (each a player of its own: a Pro Controller from its report 0x30, another model from its HID elements; `pad_hid_mac.h`, `pad_pro.h`); `DM_HID_PADS=0` stops it too; Mac only
