@@ -4,11 +4,11 @@ Date: Sun, 1 Nov 2026 12:00:00 -0600
 Subject: [PATCH] Control editor from the gear menu: split A B X Y, key labels, stick styles, button opacity
 ---
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index 7d2d01b5..535dc67d 100644
+index 51dc5c0c..563155f4 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
-@@ -25,6 +25,7 @@ DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		lev
- DM_PICTURE_FIT	choice	fit=Fit,blur=Fit with blurred bars,image=Fit with still-image bars,fill=Fill,stretch=Stretch	blur	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game. Fit shows black bars where the screen has another shape; the blurred bars are a dimmed, blurred copy of the picture (a little more GPU time), the still-image bars a fixed dark pattern. Stretch fills the whole screen by changing the picture's shape: everything looks wider or taller than it is.
+@@ -28,6 +28,7 @@ DM_PICTURE_FIT	choice	fit=Fit,blur=Fit with blurred bars?platform:ios,image=Fit
+ DM_ROTATION	choice	auto=Automatic,landscape=Landscape,portrait=Portrait	auto	platform:ios	Game	Rotation
  DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
  DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 +DM_PAD_EDIT	toggle	-	0	platform:ios	Controls	Edit controls at start	Opens the control editor once when the game starts. You can also choose Edit controls in the in-game menu (the gear) during play.
@@ -28,7 +28,7 @@ index 784727b3..38ea7be8 100644
  void dm_gamepad_touch_feedback(bool on);   // DM_TOUCH_HAPTICS
  bool dm_setting_live(const char *env, const char *value);   // front_ios.m: value NULL asks whether the running game takes env at once; otherwise applies it
 diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
-index 1f2040e7..e0af63c2 100644
+index 4910e4e8..75913ca0 100644
 --- a/dm/ios/Sources/DmGamepad.m
 +++ b/dm/ios/Sources/DmGamepad.m
 @@ -13,6 +13,11 @@
@@ -717,16 +717,16 @@ index 1f2040e7..e0af63c2 100644
      [CATransaction commit];
  }
  
-@@ -647,7 +1035,7 @@ - (void)padsChanged:(NSNotification *)note {
-     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
-     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
+@@ -709,7 +1097,7 @@ - (void)padsChanged:(NSNotification *)note {
+         if (!usable || g_merge) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), usable ? "" : " (no supported gamepad profile: not used)");
+     }
      BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
 -    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
 +    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; if (any) [self leaveEdit]; [self reset]; });   // the touch gamepad hides while any controller is in use
  }
  @end
  
-@@ -749,6 +1137,7 @@ int front_ctrl_support(int min, int max) {
+@@ -818,6 +1206,7 @@ int front_ctrl_support(int min, int max) {
  int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
  bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
  void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
@@ -735,25 +735,25 @@ index 1f2040e7..e0af63c2 100644
  void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
      dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
 diff --git a/dm/ios/Sources/GameMenu.swift b/dm/ios/Sources/GameMenu.swift
-index 1f3ad5b8..5e681c9e 100644
+index 1dbdfef0..825ba139 100644
 --- a/dm/ios/Sources/GameMenu.swift
 +++ b/dm/ios/Sources/GameMenu.swift
-@@ -18,7 +18,9 @@ private func gameMenuItems() -> [UIMenuElement] {
+@@ -41,7 +41,9 @@ private func gameMenuItems() -> [UIMenuElement] {
      let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
          UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
      }
--    let layout = UIMenu(title: "Controller layout", options: .singleSelection, children: layouts)   // a choice's value shows in its submenu: a subtitle would make each row two lines
-+    let edit = UIAction(title: "Edit controls", image: UIImage(systemName: "slider.horizontal.3")) { _ in dm_pad_edit() }   // move, resize, restyle and fade the on-screen controls
+-    let layout = UIMenu(title: GameMenuText.controllerLayout.text, options: .singleSelection, children: layouts)   // a choice's value shows in its submenu: a subtitle would make each row two lines
++    let edit = UIAction(title: "Edit controls", image: UIImage(systemName: "slider.horizontal.3")) { _ in dm_pad_edit() }   // move, resize, restyle and fade the on-screen controls (not localized: DM_GAME_MENU_TEXT has no line for it)
 +    // a choice's value shows in its submenu: a subtitle would make each row two lines
-+    let layout = UIMenu(title: "Controller layout", children: [UIMenu(options: [.displayInline, .singleSelection], children: layouts), edit])
++    let layout = UIMenu(title: GameMenuText.controllerLayout.text, children: [UIMenu(options: [.displayInline, .singleSelection], children: layouts), edit])
      var items: [UIMenuElement] = []
      var placed = false
      if let m = gameMenuModel {
 diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
-index 641d8f50..939e22d8 100644
+index e136ecda..fa6b2203 100644
 --- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
 +++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
-@@ -123,6 +123,8 @@ - (void)setUp {
+@@ -189,6 +189,8 @@ - (void)setUp {
  
  - (void)tearDown {
      NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -762,7 +762,7 @@ index 641d8f50..939e22d8 100644
      if (self.savedLayout) [defaults setObject:self.savedLayout forKey:@"DmPadLayout"];
      else [defaults removeObjectForKey:@"DmPadLayout"];
      if (self.controllerListOverridden) {
-@@ -613,6 +615,47 @@ - (void)testFaceTargetsKeepTheirMultiButtonSlideBehavior {
+@@ -679,6 +681,47 @@ - (void)testFaceTargetsKeepTheirMultiButtonSlideBehavior {
      XCTAssertEqual(duo_harness_input().buttons, 0);
  }
  
@@ -811,23 +811,23 @@ index 641d8f50..939e22d8 100644
      CGRect bounds = CGRectMake(0, 0, 390, 844);
      UIView *pad = [self padForLayout:[self separatedLayout:bounds] bounds:bounds];
 diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
-index db5bfb59..0eeeafe2 100644
+index 25feee67..884bf0b8 100644
 --- a/dm/tools/tests/test_launcher_settings.py
 +++ b/dm/tools/tests/test_launcher_settings.py
 @@ -75,7 +75,7 @@ class LauncherSettingsTests(unittest.TestCase):
      def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
          ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
          self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
--        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
-+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT', 'DM_PAD_EDIT'})
+-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_ROTATION'})
++        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_ROTATION', 'DM_PAD_EDIT'})
          self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
-         s = mac['DM_FULLSCREEN']
+         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2', 'DM_NVN_ANISO'})   # Mac-only Display mode, Switch 2 controllers, and NVN texture filtering
+         self.assertNotIn('DM_NVN_ANISO', build('0100535012974000', 'vulkan', 'mac'))
 diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
-index 6faff280..1f8262ee 100644
+index 3078d47b..a112979a 100644
 --- a/docs/env_switches.tsv
 +++ b/docs/env_switches.tsv
-@@ -273,6 +273,7 @@ DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads
+@@ -316,6 +316,7 @@ DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads
  DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
  DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
  DM_PAD_IDENTICAL	switch	`0` stops reading identical pads here when GameController lists fewer of their model than IOKit has, such as two Pro Controllers over USB (each a player of its own: a Pro Controller from its report 0x30, another model from its HID elements; `pad_hid_mac.h`, `pad_pro.h`); `DM_HID_PADS=0` stops it too; Mac only
@@ -836,7 +836,7 @@ index 6faff280..1f8262ee 100644
  DM_PAD_PRESS_TO_JOIN	player	`1`: a controller is no player until one of its buttons is pressed, then it is the lowest player free, whatever its port, link or model, identical pads included (`front_mac.m`, `DmGamepad.m`, `pad_slots.h`); not with `DM_PAD_MERGE`. Launcher setting
  DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
 diff --git a/docs/playing.md b/docs/playing.md
-index 99998d45..105eed96 100644
+index 54827a9e..29bb88f6 100644
 --- a/docs/playing.md
 +++ b/docs/playing.md
 @@ -8,7 +8,7 @@ How to build and install a game: [README](../README.md#how-to-play).
@@ -849,15 +849,15 @@ index 99998d45..105eed96 100644
  In 3D, the right stick (the camera in most games) is not drawn: swipe on the right third of the screen, starting anywhere off the buttons. In Super Mario Galaxy and Super Mario Galaxy 2, other touches outside the controls move the pointer; in Captain Toad: Treasure Tracker they touch the game's screen (touch blocks, stun enemies), and in Big Brain Academy: Brain vs. Brain too (its menus and activities).
  
 diff --git a/docs/settings.md b/docs/settings.md
-index b551fe4d..ba44e406 100644
+index 47a6975f..af2a378e 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -253,7 +253,7 @@ iCloud Drive takes a moment to carry a file from one device to the other. Quit t
+@@ -266,7 +266,7 @@ iCloud Drive takes a moment to carry a file from one device to the other. Quit t
  
  ## In-game menu
  
--On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
-+On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D** and **Tap**, no controls and every touch to the game, in handheld mode; then **Edit controls**), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
+-On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture**, **Rotation** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
++On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture**, **Rotation** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode; then **Edit controls**), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
  
  Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
  

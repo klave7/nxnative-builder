@@ -4,10 +4,10 @@ Date: Thu, 5 Nov 2026 12:00:00 -0600
 Subject: [PATCH] Launcher: a game controller moves around the settings screen and plays
 ---
 diff --git a/dm/ios/Sources/Launcher.swift b/dm/ios/Sources/Launcher.swift
-index 0f9d8b66..403fbfea 100644
+index 6f47ee95..f3c9eab4 100644
 --- a/dm/ios/Sources/Launcher.swift
 +++ b/dm/ios/Sources/Launcher.swift
-@@ -95,12 +95,20 @@ private struct DocumentPicker: UIViewControllerRepresentable {
+@@ -98,12 +98,20 @@ private struct DocumentPicker: UIViewControllerRepresentable {
  private struct LauncherView: View {
      @ObservedObject var m: LauncherModel
      let play: () -> Void
@@ -27,52 +27,53 @@ index 0f9d8b66..403fbfea 100644
 +
      var body: some View {
          GeometryReader { geometry in
-             HStack(spacing: 0) {
-@@ -115,21 +123,32 @@ private struct LauncherView: View {
-                     Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
-                         .font(.callout).foregroundStyle(.secondary)
-                     playButton
-+                        .onAppear { pad.onPlay = { if !checking { start() } } }   // a controller's Play takes the same way as the touch button: the save check first
-+                        .overlay(Capsule().stroke(.white, lineWidth: 3).padding(-5).opacity(focused(LauncherPad.play) ? 1 : 0))
-+                    if pad.connected {
-+                        Text("Controller: D-pad moves, left and right change, A selects, + plays")
-+                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-+                    }
-                 }
-                 .padding(16)
-                 .frame(width: geometry.size.width / 3, height: geometry.size.height)
-+                ScrollViewReader { proxy in
-                 List {
-                     ForEach(m.sections, id: \.self) { section in
-                         let rows = m.rows(in: section)
-                         if !rows.isEmpty {
-                             Section(section) {
--                                ForEach(rows) { SettingRow(s: $0, m: m) }
-+                                ForEach(rows) { row in
-+                                    SettingRow(s: row, m: m).id(row.env)
-+                                        .listRowBackground(focused(row.env) ? Color.accentColor.opacity(0.4) : Color(uiColor: .secondarySystemGroupedBackground))
-+                                }
-                             }
-                         }
-                     }
-                     Section {
-                         Button("Reset to tested defaults") { m.reset() }
--                            .disabled(!m.changed)
-+                            .disabled(!m.changed).id(LauncherPad.reset)
-+                            .listRowBackground(focused(LauncherPad.reset) ? Color.accentColor.opacity(0.4) : Color(uiColor: .secondarySystemGroupedBackground))
-                     } footer: {
-                         Text("Brings back all settings this game was tested with.")
-                     }
-@@ -144,6 +163,8 @@ private struct LauncherView: View {
-                 }
-                 .listStyle(.insetGrouped)
-                 .contentMargins(.horizontal, 12, for: .scrollContent)
-+                .onChange(of: pad.focus) { _, id in if pad.active { withAnimation { proxy.scrollTo(id, anchor: .center) } } }
-+                }
-                 .frame(width: geometry.size.width * 2 / 3)
-             }
+             // Landscape: the game's name and Play on the left third, the settings beside them; upright (Rotation, an iPad turned), the name and Play above the settings
+@@ -161,22 +169,33 @@ private struct LauncherView: View {
+             Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
+                 .font(.callout).foregroundStyle(.secondary)
+             playButton
++                .onAppear { pad.onPlay = { if !checking { start() } } }   // a controller's Play takes the same way as the touch button: the save check first
++                .overlay(Capsule().stroke(.white, lineWidth: 3).padding(-5).opacity(focused(LauncherPad.play) ? 1 : 0))
++            if pad.connected {
++                Text("Controller: D-pad moves, left and right change, A selects, + plays")
++                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
++            }
          }
-@@ -217,6 +238,7 @@ private struct LauncherView: View {
+     }
+ 
+     private var settingsList: some View {
++        ScrollViewReader { proxy in
+         List {
+             ForEach(m.sections, id: \.self) { section in
+                 let rows = m.rows(in: section)
+                 if !rows.isEmpty {
+                     Section(section) {
+-                        ForEach(rows) { SettingRow(s: $0, m: m) }
++                        ForEach(rows) { row in
++                            SettingRow(s: row, m: m).id(row.env)
++                                .listRowBackground(focused(row.env) ? Color.accentColor.opacity(0.4) : Color(uiColor: .secondarySystemGroupedBackground))
++                        }
+                     }
+                 }
+             }
+             Section {
+                 Button("Reset to tested defaults") { m.reset() }
+-                    .disabled(!m.changed)
++                    .disabled(!m.changed).id(LauncherPad.reset)
++                    .listRowBackground(focused(LauncherPad.reset) ? Color.accentColor.opacity(0.4) : Color(uiColor: .secondarySystemGroupedBackground))
+             } footer: {
+                 Text("Brings back all settings this game was tested with.")
+             }
+@@ -192,6 +211,8 @@ private struct LauncherView: View {
+         }
+         .listStyle(.insetGrouped)
+         .contentMargins(.horizontal, 12, for: .scrollContent)
++        .onChange(of: pad.focus) { _, id in if pad.active { withAnimation { proxy.scrollTo(id, anchor: .center) } } }
++        }
+     }
+ 
+     @ViewBuilder var playButton: some View {
+@@ -245,6 +266,7 @@ private struct LauncherView: View {
      private func go(_ choice: String?) {
          asking = nil
          if let choice { setenv("DM_SAVE_SYNC_CHOICE", choice, 1); fputs("launcher: DM_SAVE_SYNC_CHOICE=\(choice)\n", stderr) }
@@ -299,7 +300,7 @@ index 00000000..615b291a
 +if __name__ == '__main__':
 +    unittest.main()
 diff --git a/docs/playing.md b/docs/playing.md
-index 105eed96..cae4414a 100644
+index 29bb88f6..d9adbc17 100644
 --- a/docs/playing.md
 +++ b/docs/playing.md
 @@ -14,6 +14,8 @@ In 3D, the right stick (the camera in most games) is not drawn: swipe on the rig
