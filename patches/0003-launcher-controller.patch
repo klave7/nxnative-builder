@@ -4,10 +4,10 @@ Date: Thu, 5 Nov 2026 12:00:00 -0600
 Subject: [PATCH] Launcher: a game controller moves around the settings screen and plays
 ---
 diff --git a/dm/ios/Sources/Launcher.swift b/dm/ios/Sources/Launcher.swift
-index 6f47ee95..f3c9eab4 100644
+index 0e8b8ed1..ec228d86 100644
 --- a/dm/ios/Sources/Launcher.swift
 +++ b/dm/ios/Sources/Launcher.swift
-@@ -98,12 +98,20 @@ private struct DocumentPicker: UIViewControllerRepresentable {
+@@ -45,6 +45,7 @@ private struct CloudSavesSection: View {
  private struct LauncherView: View {
      @ObservedObject var m: LauncherModel
      let play: () -> Void
@@ -15,8 +15,9 @@ index 6f47ee95..f3c9eab4 100644
      @State private var memory = os_proc_available_memory()
      @State private var checking = false
      @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
-     @State private var report: SaveSyncReport?
-     @State private var asking: SaveSyncReport.Step?
+@@ -54,6 +55,13 @@ private struct LauncherView: View {
+     @State private var cloudFolder = ""
+     @State private var cloudNote = ""
  
 +    init(m: LauncherModel, play: @escaping () -> Void) {
 +        self.m = m; self.play = play
@@ -28,7 +29,7 @@ index 6f47ee95..f3c9eab4 100644
      var body: some View {
          GeometryReader { geometry in
              // Landscape: the game's name and Play on the left third, the settings beside them; upright (Rotation, an iPad turned), the name and Play above the settings
-@@ -161,22 +169,33 @@ private struct LauncherView: View {
+@@ -139,22 +147,33 @@ private struct LauncherView: View {
              Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
                  .font(.callout).foregroundStyle(.secondary)
              playButton
@@ -64,7 +65,7 @@ index 6f47ee95..f3c9eab4 100644
              } footer: {
                  Text("Brings back all settings this game was tested with.")
              }
-@@ -192,6 +211,8 @@ private struct LauncherView: View {
+@@ -179,6 +198,8 @@ private struct LauncherView: View {
          }
          .listStyle(.insetGrouped)
          .contentMargins(.horizontal, 12, for: .scrollContent)
@@ -73,7 +74,7 @@ index 6f47ee95..f3c9eab4 100644
      }
  
      @ViewBuilder var playButton: some View {
-@@ -245,6 +266,7 @@ private struct LauncherView: View {
+@@ -235,6 +256,7 @@ private struct LauncherView: View {
      private func go(_ choice: String?) {
          asking = nil
          if let choice { setenv("DM_SAVE_SYNC_CHOICE", choice, 1); fputs("launcher: DM_SAVE_SYNC_CHOICE=\(choice)\n", stderr) }
@@ -300,7 +301,7 @@ index 00000000..615b291a
 +if __name__ == '__main__':
 +    unittest.main()
 diff --git a/docs/playing.md b/docs/playing.md
-index 29bb88f6..d9adbc17 100644
+index 8ac1cfb4..55d8176d 100644
 --- a/docs/playing.md
 +++ b/docs/playing.md
 @@ -14,6 +14,8 @@ In 3D, the right stick (the camera in most games) is not drawn: swipe on the rig
